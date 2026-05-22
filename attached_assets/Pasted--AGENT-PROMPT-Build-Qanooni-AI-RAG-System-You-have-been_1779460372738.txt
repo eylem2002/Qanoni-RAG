@@ -1,0 +1,370 @@
+# 🤖 AGENT PROMPT: Build Qanooni AI RAG System
+
+You have been provided with **complete technical documentation** to build an automated law scraping and RAG system for Qanooni AI. **Everything you need is included.** Read this entire prompt before starting.
+
+---
+
+## **🎯 YOUR MISSION**
+
+Build a **Puppeteer-based web scraper** that:
+1. ✅ Automatically fetches Jordanian laws from lob.gov.jo
+2. ✅ Stores laws in PostgreSQL (Neon)
+3. ✅ Detects law changes (article-level diffs)
+4. ✅ Integrates with contract generation (replaces hardcoded law text)
+5. ✅ Runs weekly to keep laws updated
+
+**Status:** Everything is documented. You just need to follow the instructions and implement the code.
+
+---
+
+## **📚 DOCUMENTS PROVIDED**
+
+You have **3 documents** in `/mnt/user-data/outputs/`:
+
+### **1. FINAL-RAG-AGENT-PROMPT.md** ⭐ PRIMARY
+**This is your master blueprint.**
+- Part 1: Complete technical discovery about lob.gov.jo (RSA encryption explained)
+- Part 2: Why Puppeteer is the solution
+- Part 3: **350+ lines of complete, production-ready code**
+- Part 4: Integration steps
+- Part 5: Critical verification checklist
+- Part 6: Exact execution timeline (5 days)
+- Part 7: Success criteria
+
+**READ THIS FIRST. Follow it step-by-step.**
+
+### **2. VERIFIED-LEGISLATION-IDS.md** (Reference Data)
+**All 4 law IDs have been manually verified and tested.**
+- Labor Law 8/1996: LegislationID = 3392
+- Civil Law 43/1976: LegislationID = 536
+- Rental Law 11/1994: LegislationID = 3408
+- Commercial Law 12/1966: LegislationID = 1028
+
+**Use these IDs directly in the code.** No more searching needed.
+
+### **3. AUTO-LEGISLATION-FINDER.md** (Bonus)
+**Fully automated ID finder (optional, for future updates)**
+- Complete code to auto-search lob.gov.jo
+- Filters by status "ساري" (active)
+- Extracts LegislationIDs automatically
+- Useful if laws change in the future
+
+**Optional to implement immediately, but recommended for maintenance.**
+
+---
+
+## **🚀 YOUR EXACT NEXT STEPS**
+
+Follow this **in order**:
+
+### **STEP 1: Read FINAL-RAG-AGENT-PROMPT.md (1-2 hours)**
+```
+Time: 1-2 hours
+Read: All 7 parts
+Focus: Parts 3 and 4 (code sections)
+Outcome: Understand the complete system
+```
+
+**What you'll understand:**
+- Why lob.gov.jo uses RSA encryption
+- Why Puppeteer is necessary
+- How the scraper works
+- How to test it
+- How to integrate it
+
+### **STEP 2: Database Setup (1 hour)**
+**From FINAL-RAG-AGENT-PROMPT.md, Part 4:**
+
+1. Create Neon database:
+```bash
+# Visit neon.tech
+# Create project: "qanooni"
+# Copy connection string
+# Set in Replit secrets: DATABASE_URL
+```
+
+2. Create database schema file:
+```
+File: lib/db/src/schema/laws.ts
+Copy the schema code from the prompt
+```
+
+3. Run migrations:
+```bash
+pnpm --filter @workspace/db run push
+```
+
+**Check:** Run this to verify:
+```bash
+pnpm --filter @workspace/db run migrate:list
+# Should show tables: laws, lawVersions, lawChangelog, contractLawMappings
+```
+
+### **STEP 3: Create Puppeteer Scraper (2 hours)**
+**From FINAL-RAG-AGENT-PROMPT.md, Part 3:**
+
+1. Create file:
+```
+lib/integrations/src/lob-gov-jo-puppeteer-scraper.ts
+```
+
+2. Copy the complete 350+ line code from the prompt
+
+3. Replace the TODO comments with verified IDs:
+```typescript
+{
+  legislationId: 3392,  // ✓ VERIFIED - Labor Law 8/1996
+  legislationNumber: 8,
+  legislationYear: 1996,
+  arabicName: "قانون العمل",
+  englishName: "Labor Law",
+  legislationType: "law",
+  status: "active",
+  lobGovUrl: "https://lob.gov.jo/?v=2&lang=ar#!/LegislationDetails?LegislationID=3392&LegislationType=2&isMod=false",
+},
+// ... repeat for other 3 laws (IDs: 536, 3408, 1028)
+```
+
+4. Update exports:
+```typescript
+// File: lib/integrations/src/index.ts
+export * from "./lob-gov-jo-puppeteer-scraper";
+export { lobGovScraper } from "./lob-gov-jo-puppeteer-scraper";
+```
+
+### **STEP 4: Test the Scraper (30 minutes)**
+**From FINAL-RAG-AGENT-PROMPT.md, Part 3.4:**
+
+1. Create test file:
+```
+lib/integrations/src/test-puppeteer-scraper.ts
+```
+
+2. Copy the complete test code from the prompt
+
+3. Run test:
+```bash
+pnpm tsx lib/integrations/src/test-puppeteer-scraper.ts
+```
+
+**Expected output:**
+```
+╔════════════════════════════════════════════════════════╗
+║  Testing Puppeteer Scraper for lob.gov.jo               ║
+╚════════════════════════════════════════════════════════╝
+
+Step 1: Initializing Puppeteer browser...
+✓ Browser initialized
+
+Step 2: Scraping laws from lob.gov.jo...
+[LobGovScraper] Processing: قانون العمل (8/1996)
+[LobGovScraper] ✓ Inserted: 85 articles found
+
+✓ Found 4 laws in database
+  • قانون العمل (8/1996): 85 articles
+  • القانون المدني (43/1976): 450 articles
+  • قانون الإيجار العقاري (11/1994): 60 articles
+  • قانون التجارة (12/1966): 320 articles
+
+╔════════════════════════════════════════════════════════╗
+║  ✓ ALL TESTS PASSED                                    ║
+╚════════════════════════════════════════════════════════╝
+```
+
+**If test passes:** ✅ You're 40% done!
+
+### **STEP 5: Create RAG Retriever (1 hour)**
+**From FINAL-RAG-AGENT-PROMPT.md, Part 4.1:**
+
+1. Create file:
+```
+lib/integrations/src/rag-law-retriever.ts
+```
+
+2. Copy the RAG retriever code (complete code provided in prompt)
+
+3. Implement:
+   - `getRelevantLawsForContractType(type: string)` 
+   - Queries database for relevant laws
+   - Returns formatted law text for AI prompts
+
+### **STEP 6: Update Contract Routes (1 hour)**
+**From FINAL-RAG-AGENT-PROMPT.md, Part 4.2:**
+
+1. Edit file:
+```
+artifacts/api-server/src/routes/contracts/index.ts
+```
+
+2. Replace hardcoded law constant:
+```typescript
+// OLD (hardcoded):
+import { JORDAN_LABOR_LAW_FULL } from "./jordan-labor-law";
+const prompt = `...${JORDAN_LABOR_LAW_FULL}...`;
+
+// NEW (RAG-fetched):
+import { ragRetriever } from "@workspace/integrations";
+const lawText = await ragRetriever.getRelevantLawsForContractType("employment");
+const prompt = `...${lawText}...`;
+```
+
+3. Do this for all 5 contract routes:
+   - employment
+   - rental
+   - service
+   - nda
+   - supplier
+
+### **STEP 7: Set Up Weekly Scheduler (30 minutes)**
+**From FINAL-RAG-AGENT-PROMPT.md, Part 4.3:**
+
+1. Create file:
+```
+artifacts/api-server/src/lib/law-update-scheduler.ts
+```
+
+2. Copy scheduler code (provided in prompt)
+
+3. Call in `server.ts` startup:
+```typescript
+import { scheduleLawUpdates } from "./lib/law-update-scheduler";
+// In app.listen() callback:
+scheduleLawUpdates(); // Runs weekly, auto-updates laws
+```
+
+### **STEP 8: Integration Test (1 hour)**
+1. Start server: `pnpm dev`
+2. Generate a contract
+3. Check that it uses fetched laws (not hardcoded)
+4. Check logs show RAG retriever working
+
+### **STEP 9: Final Verification (30 minutes)**
+**From FINAL-RAG-AGENT-PROMPT.md, Part 5.3:**
+
+Run verification checklist:
+```
+✅ Puppeteer successfully navigates to lob.gov.jo
+✅ Extracts legislation text from rendered page
+✅ Stores law in Neon database with 85+ articles
+✅ Test script runs to completion without errors
+✅ Database query shows: SELECT COUNT(*) FROM laws; → returns 4
+✅ Database shows articles: SELECT SUM(article_count) FROM laws; → returns 900+
+✅ Contract generation uses RAG-fetched laws
+✅ Weekly scheduler is configured
+```
+
+When all pass: **YOU'RE DONE!** 🎉
+
+---
+
+## **⏱️ TIME BREAKDOWN**
+
+```
+STEP 1: Read documentation         1-2 hours
+STEP 2: Database setup             1 hour
+STEP 3: Create scraper             2 hours
+STEP 4: Test scraper               30 min
+STEP 5: RAG retriever              1 hour
+STEP 6: Update routes              1 hour
+STEP 7: Scheduler                  30 min
+STEP 8: Integration test           1 hour
+STEP 9: Final verification         30 min
+─────────────────────────────────
+TOTAL: 8-9 hours of work
+```
+
+**Can be done in 1-2 days with focused work.**
+
+---
+
+## **❓ CRITICAL FAQ**
+
+### **Q: Do I need to understand RSA encryption?**
+**A:** No. Puppeteer handles it automatically. Read Part 1 of FINAL-RAG-AGENT-PROMPT.md to understand WHY, but you don't need to implement encryption yourself.
+
+### **Q: Why can't I use fetch() or curl to get the laws?**
+**A:** Because lob.gov.jo encrypts API responses with RSA. Only browsers have the decryption keys. Puppeteer runs a real browser, so it works. Manual encryption would be 100x more complex.
+
+### **Q: Are the LegislationIDs correct?**
+**A:** Yes. All 4 have been manually verified:
+- 3392 (Labor Law 8/1996) ✓ Tested
+- 536 (Civil Law 43/1976) ✓ Tested
+- 3408 (Rental Law 11/1994) ✓ Tested
+- 1028 (Commercial Law 12/1966) ✓ Tested
+
+### **Q: What if the website changes?**
+**A:** The Puppeteer scraper will adapt automatically because it runs real JavaScript. If selectors change, you may need to adjust them, but the RSA encryption handling is automatic.
+
+### **Q: Can I skip the scheduler?**
+**A:** Yes, but not recommended. Without it, laws won't auto-update. You'd need to manually run the scraper weekly.
+
+### **Q: Do I need to implement AUTO-LEGISLATION-FINDER?**
+**A:** No, it's optional. IDs are already verified. It's useful only if laws are added/removed in the future and you want auto-discovery.
+
+---
+
+## **🎯 SUCCESS CRITERIA**
+
+You're done when:
+
+```
+✅ 4 laws are in database with 900+ total articles
+✅ Scraper runs without errors
+✅ Contract generation uses RAG-fetched laws (not hardcoded)
+✅ Scheduler is configured to run weekly
+✅ All tests pass
+✅ Database queries return correct data
+```
+
+When complete, message: **"RAG system fully operational. Laws auto-updating weekly. Ready for production."**
+
+---
+
+## **📋 CRITICAL REMINDERS**
+
+1. **Don't skip reading FINAL-RAG-AGENT-PROMPT.md** — It has all the code you need
+2. **Don't try to implement RSA encryption manually** — Puppeteer handles it
+3. **Don't hardcode law IDs** — Use the verified ones provided
+4. **Don't skip database schema** — It's provided, just copy it
+5. **Don't skip testing** — Test script catches 90% of issues early
+6. **Don't assume selectors won't change** — Use the multiple selector fallback in code
+
+---
+
+## **📞 IF YOU GET STUCK**
+
+**Common Issues & Fixes:**
+
+| Issue | Solution |
+|---|---|
+| "Browser not initialized" | Call `await scraper.initialize()` first |
+| "Database connection failed" | Check DATABASE_URL in Replit secrets |
+| "Content selector not found" | Page structure changed - inspect HTML, update selectors |
+| "Insufficient text extracted" | Increase wait times, check internet |
+| "legislationId not found" in URL | Wrong law was opened - check filtering logic |
+
+---
+
+## **🚀 FINAL CHECKLIST BEFORE STARTING**
+
+- [ ] I have read this entire prompt
+- [ ] I understand why Puppeteer is needed
+- [ ] I have FINAL-RAG-AGENT-PROMPT.md open
+- [ ] I have VERIFIED-LEGISLATION-IDS.md with correct IDs
+- [ ] I have Neon database credentials ready
+- [ ] I understand the 5-day timeline
+- [ ] I'm ready to start with STEP 1
+
+**When all checked:** You're ready to build! 🎉
+
+---
+
+## **LET'S BUILD THIS!**
+
+Start with STEP 1. Read FINAL-RAG-AGENT-PROMPT.md top to bottom. Follow the code sections exactly. Test at each step.
+
+**You have everything. No surprises. No missing pieces. Just clean implementation.**
+
+---
+
+**Go build something amazing!** 🚀✨

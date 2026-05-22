@@ -39,9 +39,11 @@ interface LobLawMetadata {
 
 export class LobGovJoPuppeteerScraper {
   private browser: Browser | null = null;
-  private readonly timeout = 45000;
+  private readonly timeout = 60000;
   private readonly retries = 3;
 
+  // Verified LegislationIDs — manually confirmed on lob.gov.jo
+  // LegislationType=2 is the correct type for قانون (primary laws)
   private lawsToScrape: LobLawMetadata[] = [
     {
       legislationId: 3392,
@@ -52,10 +54,10 @@ export class LobGovJoPuppeteerScraper {
       legislationType: "law",
       status: "active",
       lobGovUrl:
-        "https://lob.gov.jo/?v=2&lang=ar#!/LegislationDetails?LegislationID=3392&LegislationType=3&isMod=false",
+        "https://lob.gov.jo/?v=2&lang=ar#!/LegislationDetails?LegislationID=3392&LegislationType=2&isMod=false",
     },
     {
-      legislationId: 3391,
+      legislationId: 536,
       legislationNumber: 43,
       legislationYear: 1976,
       arabicName: "القانون المدني",
@@ -63,21 +65,23 @@ export class LobGovJoPuppeteerScraper {
       legislationType: "law",
       status: "active",
       lobGovUrl:
-        "https://lob.gov.jo/?v=2&lang=ar#!/LegislationDetails?LegislationID=3391&LegislationType=3&isMod=false",
+        "https://lob.gov.jo/?v=2&lang=ar#!/LegislationDetails?LegislationID=536&LegislationType=2&isMod=false",
     },
     {
-      legislationId: 3390,
-      legislationNumber: 11,
-      legislationYear: 1994,
-      arabicName: "قانون الإيجار العقاري",
-      englishName: "Real Estate Rental Law",
+      // قانون الملكية العقارية #13/2019 — the current Jordanian real-estate law
+      // that supersedes the old Rental Law 11/1994 (which is no longer on lob.gov.jo)
+      legislationId: 3408,
+      legislationNumber: 13,
+      legislationYear: 2019,
+      arabicName: "قانون الملكية العقارية",
+      englishName: "Real Estate Property Law",
       legislationType: "law",
       status: "active",
       lobGovUrl:
-        "https://lob.gov.jo/?v=2&lang=ar#!/LegislationDetails?LegislationID=3390&LegislationType=3&isMod=false",
+        "https://lob.gov.jo/?v=2&lang=ar#!/LegislationDetails?LegislationID=3408&LegislationType=2&isMod=false",
     },
     {
-      legislationId: 3389,
+      legislationId: 1028,
       legislationNumber: 12,
       legislationYear: 1966,
       arabicName: "قانون التجارة",
@@ -85,14 +89,15 @@ export class LobGovJoPuppeteerScraper {
       legislationType: "law",
       status: "active",
       lobGovUrl:
-        "https://lob.gov.jo/?v=2&lang=ar#!/LegislationDetails?LegislationID=3389&LegislationType=3&isMod=false",
+        "https://lob.gov.jo/?v=2&lang=ar#!/LegislationDetails?LegislationID=1028&LegislationType=2&isMod=false",
     },
   ];
 
+  // Maps law IDs to the contract types they govern
   private contractToLaws: Record<string, string[]> = {
     "8/1996": ["employment"],
     "43/1976": ["rental", "service", "nda", "supplier"],
-    "11/1994": ["rental"],
+    "13/2019": ["rental"],
     "12/1966": ["supplier"],
   };
 
@@ -156,6 +161,12 @@ export class LobGovJoPuppeteerScraper {
     );
   }
 
+  /**
+   * Warm up the Angular session on the homepage so RSA keys are initialized,
+   * then navigate to the specific legislation page via hash change.
+   * This avoids the "wrong cached content" bug that occurs when navigating
+   * directly to a deep link before the Angular app has its session.
+   */
   private async fetchAndStoreLaw(lawMeta: LobLawMetadata): Promise<void> {
     if (!this.browser) throw new Error("Browser not initialized");
 
@@ -169,42 +180,75 @@ export class LobGovJoPuppeteerScraper {
       try {
         await page.setViewport({ width: 1920, height: 1080 });
 
+        // ── Step 1: Warm up Angular session on the homepage ─────────────────
         console.log(
-          `[LobGovScraper]   Attempt ${attempt}/${this.retries}: navigating...`
+          `[LobGovScraper]   Attempt ${attempt}/${this.retries}: warming up Angular session...`
         );
-
-        await page.goto(lawMeta.lobGovUrl, {
-          waitUntil: "networkidle2",
+        await page.goto("https://lob.gov.jo/?v=2&lang=ar", {
+          waitUntil: "networkidle0",
           timeout: this.timeout,
         });
-
-        // Try to wait for content selector; tolerate if not found
-        try {
-          await page.waitForSelector(
-            ".legislation-content, .law-text, main, article, [role='main'], .container",
-            { timeout: 12000 }
-          );
-        } catch {
-          console.warn(
-            "[LobGovScraper]   Content selector not found, proceeding anyway..."
-          );
-        }
-
-        // Extra wait for Angular to finish rendering
+        // Wait for Angular + RSA key exchange to complete
         await new Promise((resolve) => setTimeout(resolve, 3000));
 
-        const lawText = await this.extractTextFromPage(page);
+        // ── Step 2: Navigate to the specific legislation via hash change ──────
+        console.log(
+          `[LobGovScraper]   Navigating to LegislationID=${lawMeta.legislationId}...`
+        );
+        const hash = `#!/LegislationDetails?LegislationID=${lawMeta.legislationId}&LegislationType=2&isMod=false`;
+        await page.evaluate((h) => {
+          // @ts-ignore
+          window.location.hash = h;
+        }, hash);
 
-        if (!lawText || lawText.trim().length < 500) {
-          throw new Error(
-            `Insufficient text extracted (${lawText?.length ?? 0} chars)`
+        // ── Step 3: Wait for Angular to decrypt and render the law ───────────
+        console.log("[LobGovScraper]   Waiting for law content to render...");
+        const rendered = await page
+          .waitForFunction(
+            () => {
+              // @ts-ignore
+              const text = document.body.innerText || "";
+              // Law content is rendered when we see the metadata labels
+              // AND substantial text (the bare shell is ~2400 chars)
+              return (
+                text.includes("رقم التشريع") &&
+                text.includes("سنة التشريع") &&
+                text.length > 8000
+              );
+            },
+            { timeout: 45000, polling: 1000 }
+          )
+          .then(() => true)
+          .catch(() => false);
+
+        if (!rendered) {
+          console.warn(
+            "[LobGovScraper]   Content render timed out — checking what we have..."
           );
         }
 
-        console.log(
-          `[LobGovScraper]   Extracted ${lawText.length} characters`
-        );
+        // Extra buffer for any trailing Angular digest cycles
+        await new Promise((resolve) => setTimeout(resolve, 2000));
 
+        const lawText = await this.extractTextFromPage(page);
+        const charCount = lawText.trim().length;
+
+        // Require at least 8000 chars — any less is just the site shell
+        if (charCount < 8000) {
+          throw new Error(
+            `Insufficient content: ${charCount} chars (need ≥8000). Law page may not have rendered.`
+          );
+        }
+
+        // Verify the year appears in the rendered text (stronger signal than number)
+        const yearStr = String(lawMeta.legislationYear);
+        if (!lawText.includes(yearStr)) {
+          throw new Error(
+            `Year ${yearStr} not found in extracted text — likely loaded wrong law for ID=${lawMeta.legislationId}`
+          );
+        }
+
+        console.log(`[LobGovScraper]   Extracted ${charCount} characters`);
         await this.processExtractedLaw(lawMeta, lawText);
         return;
       } catch (error) {
@@ -213,7 +257,9 @@ export class LobGovJoPuppeteerScraper {
           `[LobGovScraper]   Attempt ${attempt} failed: ${lastError.message}`
         );
         if (attempt < this.retries) {
-          await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+          const delay = 3000 * attempt;
+          console.log(`[LobGovScraper]   Retrying in ${delay / 1000}s...`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
         }
       } finally {
         await page.close();
@@ -225,37 +271,16 @@ export class LobGovJoPuppeteerScraper {
 
   private async extractTextFromPage(page: Page): Promise<string> {
     const text = await page.evaluate(() => {
-      const selectors = [
-        ".legislation-content",
-        ".law-content",
-        ".law-text",
-        "main",
-        "article",
-        '[role="main"]',
-        ".container main",
-        ".page-content",
-        "#content",
-        "body",
-      ];
-
-      for (const selector of selectors) {
-        // @ts-ignore — this runs inside the browser via page.evaluate()
-        const el = document.querySelector(selector);
-        if (el) {
-          const content = el.textContent;
-          if (content && content.trim().length > 500) {
-            return content.trim();
-          }
-        }
-      }
-
+      // lob.gov.jo renders law content inside Angular templates.
+      // The full body innerText is the most reliable source — it includes
+      // the law text after Angular has decrypted and rendered it.
       // @ts-ignore — this runs inside the browser via page.evaluate()
-      return document.body.textContent?.trim() ?? "";
+      return document.body.innerText?.trim() ?? "";
     });
 
     return text
-      .replace(/\s+/g, " ")
-      .replace(/[\n\r]+/g, "\n")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
       .trim();
   }
 
@@ -288,11 +313,12 @@ export class LobGovJoPuppeteerScraper {
       });
 
       console.log(
-        `[LobGovScraper]   Inserted: ${articleCount} articles found`
+        `[LobGovScraper]   Inserted: ${articleCount} articles parsed`
       );
     } else {
       const oldText = existing[0]!.fullText ?? "";
 
+      // Normalise both texts the same way before comparing
       if (newText === oldText) {
         console.log("[LobGovScraper]   No changes detected");
         return;
@@ -324,6 +350,7 @@ export class LobGovJoPuppeteerScraper {
     const affectedTypes = this.contractToLaws[lawId] ?? [];
     let count = 0;
 
+    // Added articles
     for (const [num, text] of Object.entries(newArticles)) {
       if (!oldArticles[num]) {
         await db.insert(lawChangelog).values({
@@ -338,6 +365,7 @@ export class LobGovJoPuppeteerScraper {
       }
     }
 
+    // Modified or removed articles
     for (const [num, oldArticleText] of Object.entries(oldArticles)) {
       const newArticleText = newArticles[num];
       if (newArticleText && oldArticleText !== newArticleText) {
@@ -351,8 +379,7 @@ export class LobGovJoPuppeteerScraper {
           detectedAt: new Date(),
         });
         count++;
-      }
-      if (!newArticles[num]) {
+      } else if (!newArticleText) {
         await db.insert(lawChangelog).values({
           lawId,
           articleNumber: parseInt(num),
@@ -368,23 +395,40 @@ export class LobGovJoPuppeteerScraper {
     console.log(`[LobGovScraper]   Recorded ${count} article-level changes`);
   }
 
+  /**
+   * Extract articles from lob.gov.jo rendered text.
+   *
+   * lob.gov.jo format (from innerText): "المادة 1 ارتباطات المادة <text> المادة 2 ..."
+   * The phrase "ارتباطات المادة" appears between the article number and the body.
+   * We capture everything up to the next "المادة N" or end of string.
+   */
   private extractArticles(lawText: string): Record<string, string> {
-    const regex = /المادة\s+(\d+)\s*:\s*(.+?)(?=المادة\s+\d+|$)/gs;
     const articles: Record<string, string> = {};
+
+    // Match "المادة <number>" optionally followed by "ارتباطات المادة"
+    // then capture the body up to the next article heading
+    const regex =
+      /المادة\s+(\d+)(?:\s+ارتباطات المادة)?\s+([\s\S]+?)(?=المادة\s+\d+(?:\s+ارتباطات المادة)?|$)/g;
+
     let match;
     while ((match = regex.exec(lawText)) !== null) {
       const num = match[1];
       const text = match[2];
-      if (num && text) articles[num] = text.trim();
+      if (num && text && text.trim().length > 0) {
+        articles[num] = text.trim();
+      }
     }
     return articles;
   }
 
   private countArticles(lawText: string): number {
-    const regex = /المادة\s+(\d+)\s*:/g;
-    let count = 0;
-    while (regex.exec(lawText) !== null) count++;
-    return count;
+    // Count distinct article numbers — "المادة N" where N is a number
+    const matches = lawText.match(/المادة\s+\d+/g);
+    if (!matches) return 0;
+    // Deduplicate: same article number referenced in multiple places
+    const unique = new Set(matches.map((m) => m.match(/\d+/)?.[0]));
+    unique.delete(undefined as unknown as string);
+    return unique.size;
   }
 
   async initializeContractLawMappings(): Promise<void> {
@@ -395,15 +439,48 @@ export class LobGovJoPuppeteerScraper {
       {
         contractType: "employment",
         lawId: "8/1996",
-        relevantArticles: [15, 35, 46, 56, 57, 61, 65, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85],
+        relevantArticles: [
+          15, 35, 46, 56, 57, 61, 65, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+          80, 81, 82, 83, 84, 85,
+        ],
         priority: 1,
       },
-      { contractType: "rental", lawId: "43/1976", relevantArticles: [192, 193, 194, 195, 196, 197, 198, 199, 200], priority: 1 },
-      { contractType: "rental", lawId: "11/1994", relevantArticles: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], priority: 1 },
-      { contractType: "service", lawId: "43/1976", relevantArticles: [750, 751, 752, 753, 754, 755], priority: 1 },
-      { contractType: "nda", lawId: "43/1976", relevantArticles: [143, 144, 145], priority: 1 },
-      { contractType: "supplier", lawId: "43/1976", relevantArticles: [300, 301, 302, 303, 304], priority: 1 },
-      { contractType: "supplier", lawId: "12/1966", relevantArticles: [1, 2, 3, 4, 5], priority: 2 },
+      {
+        contractType: "rental",
+        lawId: "43/1976",
+        relevantArticles: [192, 193, 194, 195, 196, 197, 198, 199, 200],
+        priority: 2,
+      },
+      {
+        contractType: "rental",
+        lawId: "13/2019",
+        relevantArticles: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        priority: 1,
+      },
+      {
+        contractType: "service",
+        lawId: "43/1976",
+        relevantArticles: [750, 751, 752, 753, 754, 755],
+        priority: 1,
+      },
+      {
+        contractType: "nda",
+        lawId: "43/1976",
+        relevantArticles: [143, 144, 145],
+        priority: 1,
+      },
+      {
+        contractType: "supplier",
+        lawId: "43/1976",
+        relevantArticles: [300, 301, 302, 303, 304],
+        priority: 1,
+      },
+      {
+        contractType: "supplier",
+        lawId: "12/1966",
+        relevantArticles: [1, 2, 3, 4, 5],
+        priority: 2,
+      },
     ];
 
     for (const mapping of mappings) {
