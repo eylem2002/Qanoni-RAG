@@ -1,26 +1,83 @@
 import { lobGovScraper } from "@workspace/integrations";
 import { logger } from "./logger";
 
+// ---------------------------------------------------------------------------
+// Sync state (in-memory — single-process server)
+// ---------------------------------------------------------------------------
+
+export interface SyncState {
+  inProgress: boolean;
+  lastSyncAt: string | null;
+  lastSyncStatus: "success" | "error" | null;
+  nextSyncAt: string | null;
+}
+
+const state: SyncState = {
+  inProgress: false,
+  lastSyncAt: null,
+  lastSyncStatus: null,
+  nextSyncAt: null,
+};
+
+export function getSyncState(): SyncState {
+  return { ...state };
+}
+
+// ---------------------------------------------------------------------------
+// Core sync logic
+// ---------------------------------------------------------------------------
+
 async function runLawSync(label: string): Promise<void> {
+  if (state.inProgress) {
+    logger.warn(`[${label}] Sync already in progress — skipping`);
+    return;
+  }
+
+  state.inProgress = true;
   logger.info(`[${label}] Running law sync...`);
+
   try {
     await lobGovScraper.initialize();
     await lobGovScraper.updateAllLaws();
     await lobGovScraper.initializeContractLawMappings();
     await lobGovScraper.shutdown();
+
+    state.lastSyncAt = new Date().toISOString();
+    state.lastSyncStatus = "success";
     logger.info(`[${label}] Law sync completed`);
   } catch (error) {
+    state.lastSyncAt = new Date().toISOString();
+    state.lastSyncStatus = "error";
     logger.error({ error }, `[${label}] Law sync failed`);
-    // Always shut down browser on error to avoid leaks
     try {
       await lobGovScraper.shutdown();
     } catch {
       // ignore
     }
+  } finally {
+    state.inProgress = false;
   }
 }
 
-function scheduleWeeklyUpdate() {
+// ---------------------------------------------------------------------------
+// Manual trigger (for the "Sync Now" admin button)
+// ---------------------------------------------------------------------------
+
+/**
+ * Trigger an immediate law sync in the background.
+ * Returns false if a sync is already running.
+ */
+export function triggerManualSync(): boolean {
+  if (state.inProgress) return false;
+  void runLawSync("Manual");
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Weekly scheduler
+// ---------------------------------------------------------------------------
+
+function scheduleWeeklyUpdate(): void {
   const MONDAY = 1;
   const TARGET_HOUR = 2;
 
@@ -33,9 +90,11 @@ function scheduleWeeklyUpdate() {
     return next.getTime() - now.getTime();
   }
 
-  function scheduleNext() {
+  function scheduleNext(): void {
     const delay = msUntilNextMonday2am();
-    logger.info({ delayMs: delay }, "[Scheduler] Next law sync scheduled");
+    state.nextSyncAt = new Date(Date.now() + delay).toISOString();
+    logger.info({ delayMs: delay, nextSyncAt: state.nextSyncAt }, "[Scheduler] Next law sync scheduled");
+
     setTimeout(async () => {
       await runLawSync("Scheduler");
       scheduleNext();
@@ -46,7 +105,6 @@ function scheduleWeeklyUpdate() {
 }
 
 export function scheduleLawUpdates(): void {
-  // Run initial sync in background (non-blocking)
   void runLawSync("Startup");
   scheduleWeeklyUpdate();
 }

@@ -16,3 +16,5 @@ export * from './lawUpdateGroup';
 export * from './pendingLawChangesResponse';
 export * from './storedLaw';
 export * from './storedLawsResponse';
+export * from './syncStatus';
+export * from './syncTriggerResult';

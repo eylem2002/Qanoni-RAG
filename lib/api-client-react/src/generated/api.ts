@@ -24,7 +24,9 @@ import type {
   HealthStatus,
   LawChangesHistoryResponse,
   PendingLawChangesResponse,
-  StoredLawsResponse
+  StoredLawsResponse,
+  SyncStatus,
+  SyncTriggerResult
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -350,6 +352,155 @@ export function useGetStoredLaws<TData = Awaited<ReturnType<typeof getStoredLaws
 
 
 
+
+export const getGetSyncStatusUrl = () => {
+
+
+
+
+  return `/api/admin/law-changes/status`
+}
+
+/**
+ * Returns current sync state including last sync time and whether a sync is in progress
+ * @summary Get scraper sync status
+ */
+export const getSyncStatus = async ( options?: RequestInit): Promise<SyncStatus> => {
+
+  return customFetch<SyncStatus>(getGetSyncStatusUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSyncStatusQueryKey = () => {
+    return [
+    `/api/admin/law-changes/status`
+    ] as const;
+    }
+
+
+export const getGetSyncStatusQueryOptions = <TData = Awaited<ReturnType<typeof getSyncStatus>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getSyncStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSyncStatusQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSyncStatus>>> = ({ signal }) => getSyncStatus({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSyncStatus>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetSyncStatusQueryResult = NonNullable<Awaited<ReturnType<typeof getSyncStatus>>>
+export type GetSyncStatusQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Get scraper sync status
+ */
+
+export function useGetSyncStatus<TData = Awaited<ReturnType<typeof getSyncStatus>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getSyncStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetSyncStatusQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+export const getTriggerSyncUrl = () => {
+
+
+
+
+  return `/api/admin/law-changes/sync`
+}
+
+/**
+ * Starts an immediate background sync. Returns 409 if a sync is already running.
+ * @summary Trigger a manual law sync
+ */
+export const triggerSync = async ( options?: RequestInit): Promise<SyncTriggerResult> => {
+
+  return customFetch<SyncTriggerResult>(getTriggerSyncUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getTriggerSyncMutationOptions = <TError = ErrorType<SyncTriggerResult>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof triggerSync>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof triggerSync>>, TError,void, TContext> => {
+
+const mutationKey = ['triggerSync'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof triggerSync>>, void> = () => {
+
+
+          return  triggerSync(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type TriggerSyncMutationResult = NonNullable<Awaited<ReturnType<typeof triggerSync>>>
+
+    export type TriggerSyncMutationError = ErrorType<SyncTriggerResult>
+
+    /**
+ * @summary Trigger a manual law sync
+ */
+export const useTriggerSync = <TError = ErrorType<SyncTriggerResult>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof triggerSync>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof triggerSync>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getTriggerSyncMutationOptions(options));
+    }
 
 export const getAcknowledgeLawChangeUrl = (changeId: number,) => {
 

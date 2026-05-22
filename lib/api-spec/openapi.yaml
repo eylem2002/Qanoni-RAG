@@ -69,6 +69,40 @@ paths:
               schema:
                 $ref: "#/components/schemas/StoredLawsResponse"
 
+  /admin/law-changes/status:
+    get:
+      operationId: getSyncStatus
+      tags: [admin]
+      summary: Get scraper sync status
+      description: Returns current sync state including last sync time and whether a sync is in progress
+      responses:
+        "200":
+          description: Current sync status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncStatus"
+
+  /admin/law-changes/sync:
+    post:
+      operationId: triggerSync
+      tags: [admin]
+      summary: Trigger a manual law sync
+      description: Starts an immediate background sync. Returns 409 if a sync is already running.
+      responses:
+        "200":
+          description: Sync triggered successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncTriggerResult"
+        "409":
+          description: Sync already in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncTriggerResult"
+
   /admin/law-changes/{changeId}/acknowledge:
     post:
       operationId: acknowledgeLawChange
@@ -250,3 +284,31 @@ components:
           type: boolean
       required:
         - success
+
+    SyncStatus:
+      type: object
+      properties:
+        inProgress:
+          type: boolean
+        lastSyncAt:
+          type: ["string", "null"]
+        lastSyncStatus:
+          type: ["string", "null"]
+        nextSyncAt:
+          type: ["string", "null"]
+      required:
+        - inProgress
+        - lastSyncAt
+        - lastSyncStatus
+        - nextSyncAt
+
+    SyncTriggerResult:
+      type: object
+      properties:
+        queued:
+          type: boolean
+        message:
+          type: string
+      required:
+        - queued
+        - message

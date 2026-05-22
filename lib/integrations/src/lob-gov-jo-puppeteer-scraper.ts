@@ -1,8 +1,8 @@
 import { existsSync } from "fs";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { db } from "@workspace/db";
-import { laws, lawChangelog, contractLawMappings } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { laws, lawChangelog, contractLawMappings, lawVersions } from "@workspace/db";
+import { eq, max } from "drizzle-orm";
 
 // Ordered list of Chromium/Chrome executables to try
 const CHROME_CANDIDATES = [
@@ -331,6 +331,15 @@ export class LobGovJoPuppeteerScraper {
         isActive: lawMeta.status === "active",
       });
 
+      // Record initial version
+      await db.insert(lawVersions).values({
+        lawId,
+        version: 1,
+        fullText: newText,
+        changesSummary: `Initial import — ${articleCount} articles`,
+        amendmentDate: new Date(),
+      });
+
       console.log(
         `[LobGovScraper]   Inserted: ${articleCount} articles parsed`
       );
@@ -363,6 +372,31 @@ export class LobGovJoPuppeteerScraper {
         .update(laws)
         .set({ fullText: newText, lastUpdated: new Date(), articleCount })
         .where(eq(laws.lawId, lawId));
+
+      // Record new version snapshot
+      const [maxRow] = await db
+        .select({ v: max(lawVersions.version) })
+        .from(lawVersions)
+        .where(eq(lawVersions.lawId, lawId));
+      const nextVersion = (maxRow?.v ?? 0) + 1;
+      const addedCount = Object.keys(newArticles).filter((k) => !(k in oldArticles)).length;
+      const removedCount = Object.keys(oldArticles).filter((k) => !(k in newArticles)).length;
+      const modifiedCount = Object.keys(newArticles).filter(
+        (k) => k in oldArticles && oldArticles[k] !== newArticles[k]
+      ).length;
+      await db.insert(lawVersions).values({
+        lawId,
+        version: nextVersion,
+        fullText: newText,
+        changesSummary: [
+          addedCount > 0 ? `${addedCount} added` : null,
+          modifiedCount > 0 ? `${modifiedCount} modified` : null,
+          removedCount > 0 ? `${removedCount} removed` : null,
+        ]
+          .filter(Boolean)
+          .join(", "),
+        amendmentDate: new Date(),
+      });
 
       console.log("[LobGovScraper]   Updated with changes");
     }

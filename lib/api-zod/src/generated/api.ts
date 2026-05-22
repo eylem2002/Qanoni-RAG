@@ -86,6 +86,28 @@ export const GetStoredLawsResponse = zod.object({
 
 
 /**
+ * Returns current sync state including last sync time and whether a sync is in progress
+ * @summary Get scraper sync status
+ */
+export const GetSyncStatusResponse = zod.object({
+  "inProgress": zod.boolean(),
+  "lastSyncAt": zod.string().nullable(),
+  "lastSyncStatus": zod.string().nullable(),
+  "nextSyncAt": zod.string().nullable()
+})
+
+
+/**
+ * Starts an immediate background sync. Returns 409 if a sync is already running.
+ * @summary Trigger a manual law sync
+ */
+export const TriggerSyncResponse = zod.object({
+  "queued": zod.boolean(),
+  "message": zod.string()
+})
+
+
+/**
  * Mark a law change as reviewed by an admin
  * @summary Acknowledge a law change
  */

@@ -10,7 +10,7 @@ function changeTypeBadge(type: string) {
 }
 
 export default function HistoryLog() {
-  const { data, isLoading } = useGetLawChangesHistory();
+  const { data, isLoading, isError } = useGetLawChangesHistory();
 
   return (
     <div className="p-8 max-w-5xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -32,6 +32,12 @@ export default function HistoryLog() {
           {[...Array(6)].map((_, i) => (
             <Skeleton key={i} className="h-16 w-full" />
           ))}
+        </div>
+      ) : isError ? (
+        <div className="bg-destructive/5 border border-destructive/20 rounded-xl p-16 text-center">
+          <Clock className="w-12 h-12 text-destructive/50 mx-auto mb-4" />
+          <h3 className="text-xl font-semibold text-destructive">Failed to load</h3>
+          <p className="text-muted-foreground mt-2">Could not fetch change history. Check your connection or try refreshing.</p>
         </div>
       ) : (data?.changes ?? []).length === 0 ? (
         <div className="bg-muted/50 border rounded-xl p-16 text-center">

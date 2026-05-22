@@ -88,3 +88,18 @@ export interface AcknowledgeResult {
   success: boolean;
 }
 
+export interface SyncStatus {
+  inProgress: boolean;
+  /** @nullable */
+  lastSyncAt: string | null;
+  /** @nullable */
+  lastSyncStatus: string | null;
+  /** @nullable */
+  nextSyncAt: string | null;
+}
+
+export interface SyncTriggerResult {
+  queued: boolean;
+  message: string;
+}
+

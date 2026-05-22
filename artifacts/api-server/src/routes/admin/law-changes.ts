@@ -2,8 +2,23 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { lawChangelog, laws } from "@workspace/db";
 import { eq, desc, isNull } from "drizzle-orm";
+import { getSyncState, triggerManualSync } from "../../lib/law-update-scheduler";
 
 const router = Router();
+
+router.get("/status", (_req, res) => {
+  void res.json(getSyncState());
+});
+
+router.post("/sync", (req, res) => {
+  const queued = triggerManualSync();
+  if (queued) {
+    req.log.info("[Admin] Manual sync triggered");
+    void res.json({ queued: true, message: "Sync started in background" });
+  } else {
+    void res.status(409).json({ queued: false, message: "A sync is already in progress" });
+  }
+});
 
 router.get("/pending", async (req, res) => {
   try {

@@ -17,7 +17,7 @@ function changeTypeBadge(type: string) {
 }
 
 export default function PendingChanges() {
-  const { data, isLoading } = useGetPendingLawChanges();
+  const { data, isLoading, isError } = useGetPendingLawChanges();
   const queryClient = useQueryClient();
   const acknowledge = useAcknowledgeLawChange();
   const [acknowledged, setAcknowledged] = useState<Set<number>>(new Set());
@@ -53,6 +53,12 @@ export default function PendingChanges() {
         <div className="space-y-6">
           <Skeleton className="h-48 w-full" />
           <Skeleton className="h-48 w-full" />
+        </div>
+      ) : isError ? (
+        <div className="bg-destructive/5 border border-destructive/20 rounded-xl p-16 text-center">
+          <AlertCircle className="w-12 h-12 text-destructive/50 mx-auto mb-4" />
+          <h3 className="text-xl font-semibold text-destructive">Failed to load</h3>
+          <p className="text-muted-foreground mt-2">Could not fetch pending changes. Check your connection or try refreshing.</p>
         </div>
       ) : (data?.laws ?? []).length === 0 ? (
         <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-16 text-center">

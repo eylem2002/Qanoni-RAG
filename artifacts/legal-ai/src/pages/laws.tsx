@@ -4,7 +4,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Scale, ExternalLink, CheckCircle2, XCircle } from "lucide-react";
 
 export default function LawsList() {
-  const { data, isLoading } = useGetStoredLaws();
+  const { data, isLoading, isError } = useGetStoredLaws();
 
   return (
     <div className="p-8 max-w-5xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -26,6 +26,12 @@ export default function LawsList() {
           {[...Array(4)].map((_, i) => (
             <Skeleton key={i} className="h-24 w-full" />
           ))}
+        </div>
+      ) : isError ? (
+        <div className="bg-destructive/5 border border-destructive/20 rounded-xl p-16 text-center">
+          <Scale className="w-12 h-12 text-destructive/50 mx-auto mb-4" />
+          <h3 className="text-xl font-semibold text-destructive">Failed to load</h3>
+          <p className="text-muted-foreground mt-2">Could not fetch the law registry. Check your connection or try refreshing.</p>
         </div>
       ) : (data?.laws ?? []).length === 0 ? (
         <div className="bg-muted/50 border rounded-xl p-16 text-center">
