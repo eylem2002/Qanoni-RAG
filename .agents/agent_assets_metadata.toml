@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "b-IHk4ZS5n1VFpT4lRB_q"
+uri = "file://SYSTEM_DOCUMENTATION.md"
+type = "text"
+title = "Qanooni AI — Full System Documentation"
