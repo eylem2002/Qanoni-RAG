@@ -89,7 +89,23 @@ router.get("/history", async (req, res) => {
 
 router.get("/laws", async (_req, res) => {
   try {
-    const allLaws = await db.select().from(laws).orderBy(desc(laws.lastUpdated));
+    // Explicitly exclude full_text — it can be 277 KB per law.
+    // Returning it on every page load would send 635 KB per request for 4 laws.
+    const allLaws = await db
+      .select({
+        id: laws.id,
+        lawId: laws.lawId,
+        arabicName: laws.arabicName,
+        englishName: laws.englishName,
+        year: laws.year,
+        articleCount: laws.articleCount,
+        lastUpdated: laws.lastUpdated,
+        lobGovUrl: laws.lobGovUrl,
+        isActive: laws.isActive,
+        createdAt: laws.createdAt,
+      })
+      .from(laws)
+      .orderBy(desc(laws.lastUpdated));
     return res.json({ total: allLaws.length, laws: allLaws });
   } catch (error) {
     return res.status(500).json({ error: "Internal server error" });

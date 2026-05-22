@@ -290,6 +290,26 @@ export class LobGovJoPuppeteerScraper {
   ): Promise<void> {
     const lawId = `${lawMeta.legislationNumber}/${lawMeta.legislationYear}`;
 
+    // Parse articles up-front so we can run the safety assertion before
+    // touching the database. UI elements are stripped inside extractArticles().
+    const newArticles = this.extractArticles(newText);
+    const articleCount = Object.keys(newArticles).length;
+
+    // ── Safety assertion ─────────────────────────────────────────────────────
+    // If fewer than 20 articles were parsed, something is wrong: either the
+    // page didn't render properly, or lob.gov.jo changed its HTML structure.
+    // Committing 0 articles would silently corrupt the stored law text.
+    // The smallest monitored law (قانون العمل) has 142 articles.
+    const MIN_ARTICLES = 20;
+    if (articleCount < MIN_ARTICLES) {
+      throw new Error(
+        `Safety check failed: only ${articleCount} articles parsed for ${lawId} ` +
+          `(expected ≥${MIN_ARTICLES}). ` +
+          `Possible causes: page rendered incorrectly, lob.gov.jo changed its format, ` +
+          `or wrong law loaded. Refusing to commit to prevent data corruption.`
+      );
+    }
+
     const existing = await db
       .select()
       .from(laws)
@@ -298,7 +318,6 @@ export class LobGovJoPuppeteerScraper {
 
     if (existing.length === 0) {
       console.log("[LobGovScraper]   NEW law — inserting...");
-      const articleCount = this.countArticles(newText);
 
       await db.insert(laws).values({
         lawId,
@@ -318,41 +337,65 @@ export class LobGovJoPuppeteerScraper {
     } else {
       const oldText = existing[0]!.fullText ?? "";
 
-      // Normalise both texts the same way before comparing
-      if (newText === oldText) {
+      // Compare article maps (not raw strings) so that UI element rendering
+      // noise (e.g. "تفسير N" counts changing) never registers as a legal change.
+      // Both sides are already stripped inside extractArticles().
+      const oldArticles = this.extractArticles(oldText);
+      const hasChanges = this.articleMapsAreDifferent(oldArticles, newArticles);
+
+      if (!hasChanges) {
         console.log("[LobGovScraper]   No changes detected");
+        // Keep full_text current even if article content is unchanged,
+        // so the next scrape has the freshest raw text to compare against.
+        if (newText !== oldText) {
+          await db
+            .update(laws)
+            .set({ fullText: newText, lastUpdated: new Date() })
+            .where(eq(laws.lawId, lawId));
+        }
         return;
       }
 
       console.log("[LobGovScraper]   CHANGES DETECTED — recording...");
-      await this.recordLawChanges(lawId, oldText, newText);
+      await this.recordLawChanges(lawId, oldArticles, newArticles);
 
       await db
         .update(laws)
-        .set({
-          fullText: newText,
-          lastUpdated: new Date(),
-          articleCount: this.countArticles(newText),
-        })
+        .set({ fullText: newText, lastUpdated: new Date(), articleCount })
         .where(eq(laws.lawId, lawId));
 
       console.log("[LobGovScraper]   Updated with changes");
     }
   }
 
+  /**
+   * Returns true if the two article maps differ in any meaningful way:
+   * articles added, removed, or with changed body text.
+   */
+  private articleMapsAreDifferent(
+    oldArticles: Record<string, string>,
+    newArticles: Record<string, string>
+  ): boolean {
+    const oldKeys = Object.keys(oldArticles);
+    const newKeys = Object.keys(newArticles);
+    if (oldKeys.length !== newKeys.length) return true;
+    for (const key of newKeys) {
+      if (newArticles[key] !== oldArticles[key]) return true;
+    }
+    return false;
+  }
+
   private async recordLawChanges(
     lawId: string,
-    oldText: string,
-    newText: string
+    oldArticles: Record<string, string>,
+    newArticles: Record<string, string>
   ): Promise<void> {
-    const oldArticles = this.extractArticles(oldText);
-    const newArticles = this.extractArticles(newText);
     const affectedTypes = this.contractToLaws[lawId] ?? [];
     let count = 0;
 
     // Added articles
     for (const [num, text] of Object.entries(newArticles)) {
-      if (!oldArticles[num]) {
+      if (oldArticles[num] === undefined) {
         await db.insert(lawChangelog).values({
           lawId,
           articleNumber: parseInt(num),
@@ -368,7 +411,7 @@ export class LobGovJoPuppeteerScraper {
     // Modified or removed articles
     for (const [num, oldArticleText] of Object.entries(oldArticles)) {
       const newArticleText = newArticles[num];
-      if (newArticleText && oldArticleText !== newArticleText) {
+      if (newArticleText !== undefined && oldArticleText !== newArticleText) {
         await db.insert(lawChangelog).values({
           lawId,
           articleNumber: parseInt(num),
@@ -379,7 +422,7 @@ export class LobGovJoPuppeteerScraper {
           detectedAt: new Date(),
         });
         count++;
-      } else if (!newArticleText) {
+      } else if (newArticleText === undefined) {
         await db.insert(lawChangelog).values({
           lawId,
           articleNumber: parseInt(num),
@@ -396,11 +439,36 @@ export class LobGovJoPuppeteerScraper {
   }
 
   /**
+   * Strip lob.gov.jo UI chrome from article body text before storing or comparing.
+   *
+   * The Angular app injects several UI elements into body.innerText that are NOT
+   * part of the law itself:
+   *   - "تفسير N"  — count of judicial interpretations linked to this article
+   *   - "التشريعات المرتبطة N" — count of related legislation links
+   *   - "ارتباطات المادة" — article relationship UI label
+   *
+   * Without stripping these, UI updates (e.g. a new interpretation being added to
+   * an article) appear as law changes. The confirmed root cause of the 17 false
+   * positives in القانون المدني: "تفسير 2\n\n" was prepended to each affected article.
+   */
+  private stripUiElements(text: string): string {
+    return text
+      .replace(/^تفسير\s+\d+\s*/gm, "")
+      .replace(/^التشريعات المرتبطة\s+\d+\s*/gm, "")
+      .replace(/ارتباطات المادة\s*/g, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  /**
    * Extract articles from lob.gov.jo rendered text.
    *
    * lob.gov.jo format (from innerText): "المادة 1 ارتباطات المادة <text> المادة 2 ..."
    * The phrase "ارتباطات المادة" appears between the article number and the body.
    * We capture everything up to the next "المادة N" or end of string.
+   *
+   * UI elements (تفسير N, التشريعات المرتبطة N) are stripped from each article body
+   * via stripUiElements() so that rendering noise never registers as a legal change.
    */
   private extractArticles(lawText: string): Record<string, string> {
     const articles: Record<string, string> = {};
@@ -413,9 +481,12 @@ export class LobGovJoPuppeteerScraper {
     let match;
     while ((match = regex.exec(lawText)) !== null) {
       const num = match[1];
-      const text = match[2];
-      if (num && text && text.trim().length > 0) {
-        articles[num] = text.trim();
+      const rawText = match[2];
+      if (num && rawText) {
+        const cleaned = this.stripUiElements(rawText);
+        if (cleaned.length > 0) {
+          articles[num] = cleaned;
+        }
       }
     }
     return articles;
