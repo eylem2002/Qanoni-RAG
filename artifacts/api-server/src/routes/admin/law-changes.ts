@@ -55,8 +55,8 @@ router.get("/pending", async (req, res) => {
           id: c.id,
           article: c.articleNumber,
           type: c.changeType,
-          oldText: c.oldText ? c.oldText.substring(0, 150) : null,
-          newText: c.newText ? c.newText.substring(0, 150) : null,
+          oldText: c.oldText ?? null,
+          newText: c.newText ?? null,
           detectedAt: c.detectedAt,
         })),
       });
