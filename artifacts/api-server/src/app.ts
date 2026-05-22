@@ -3,6 +3,7 @@ import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { scheduleLawUpdates } from "./lib/law-update-scheduler";
 
 const app: Express = express();
 
@@ -30,5 +31,9 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
+
+if (process.env["NODE_ENV"] !== "test") {
+  scheduleLawUpdates();
+}
 
 export default app;

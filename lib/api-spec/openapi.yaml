@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: admin
+    description: Admin law management operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,69 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /admin/law-changes/pending:
+    get:
+      operationId: getPendingLawChanges
+      tags: [admin]
+      summary: Get unreviewed law changes
+      description: Returns all law changes that have not been acknowledged
+      responses:
+        "200":
+          description: Pending law changes grouped by law
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PendingLawChangesResponse"
+
+  /admin/law-changes/history:
+    get:
+      operationId: getLawChangesHistory
+      tags: [admin]
+      summary: Get all law change history
+      description: Returns all law changes including reviewed ones
+      responses:
+        "200":
+          description: Full law change history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LawChangesHistoryResponse"
+
+  /admin/law-changes/laws:
+    get:
+      operationId: getStoredLaws
+      tags: [admin]
+      summary: Get all stored laws
+      description: Returns all laws currently stored in the database
+      responses:
+        "200":
+          description: List of stored laws
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoredLawsResponse"
+
+  /admin/law-changes/{changeId}/acknowledge:
+    post:
+      operationId: acknowledgeLawChange
+      tags: [admin]
+      summary: Acknowledge a law change
+      description: Mark a law change as reviewed by an admin
+      parameters:
+        - name: changeId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Change acknowledged successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcknowledgeResult"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +99,154 @@ components:
       required:
         - status
 
+    LawChangeDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+        article:
+          type: integer
+        type:
+          type: string
+        oldText:
+          type: ["string", "null"]
+        newText:
+          type: ["string", "null"]
+        detectedAt:
+          type: ["string", "null"]
+      required:
+        - id
+        - article
+        - type
+
+    LawUpdateGroup:
+      type: object
+      properties:
+        lawId:
+          type: string
+        lawName:
+          type: string
+        changesCount:
+          type: integer
+        affectedContractTypes:
+          type: array
+          items:
+            type: string
+        lastChangeAt:
+          type: ["string", "null"]
+        details:
+          type: array
+          items:
+            $ref: "#/components/schemas/LawChangeDetail"
+      required:
+        - lawId
+        - lawName
+        - changesCount
+        - affectedContractTypes
+        - details
+
+    PendingLawChangesResponse:
+      type: object
+      properties:
+        unreviewed:
+          type: integer
+        laws:
+          type: array
+          items:
+            $ref: "#/components/schemas/LawUpdateGroup"
+      required:
+        - unreviewed
+        - laws
+
+    LawChangeRecord:
+      type: object
+      properties:
+        id:
+          type: integer
+        lawId:
+          type: string
+        articleNumber:
+          type: integer
+        changeType:
+          type: string
+        oldText:
+          type: ["string", "null"]
+        newText:
+          type: ["string", "null"]
+        affectedContractTypes:
+          type: object
+        detectedAt:
+          type: ["string", "null"]
+        notified:
+          type: ["boolean", "null"]
+        acknowledgedAt:
+          type: ["string", "null"]
+      required:
+        - id
+        - lawId
+        - articleNumber
+        - changeType
+
+    LawChangesHistoryResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        changes:
+          type: array
+          items:
+            $ref: "#/components/schemas/LawChangeRecord"
+      required:
+        - total
+        - changes
+
+    StoredLaw:
+      type: object
+      properties:
+        id:
+          type: integer
+        lawId:
+          type: string
+        arabicName:
+          type: string
+        englishName:
+          type: ["string", "null"]
+        year:
+          type: string
+        articleCount:
+          type: ["integer", "null"]
+        lastUpdated:
+          type: string
+        lobGovUrl:
+          type: ["string", "null"]
+        isActive:
+          type: ["boolean", "null"]
+        createdAt:
+          type: ["string", "null"]
+      required:
+        - id
+        - lawId
+        - arabicName
+        - year
+        - lastUpdated
+
+    StoredLawsResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        laws:
+          type: array
+          items:
+            $ref: "#/components/schemas/StoredLaw"
+      required:
+        - total
+        - laws
+
+    AcknowledgeResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+      required:
+        - success

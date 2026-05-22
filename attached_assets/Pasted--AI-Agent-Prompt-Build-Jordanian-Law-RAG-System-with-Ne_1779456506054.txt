@@ -1,0 +1,1401 @@
+# 🤖 AI Agent Prompt: Build Jordanian Law RAG System with Neon
+
+You are an expert full-stack TypeScript developer. Your task is to build a **Real-Time Legal Updates system** for the Qanooni AI project. This system will automatically fetch Jordanian laws from lob.gov.jo, detect changes, and keep contract generation AI prompts always up-to-date.
+
+**DO NOT ASK CLARIFYING QUESTIONS.** Execute this prompt completely end-to-end.
+
+---
+
+## **PHASE 1: Neon Database Setup** (15 minutes)
+
+### 1.1 Create Neon PostgreSQL Database
+- Visit https://neon.tech
+- Sign up (free tier, no credit card needed)
+- Create new project named "qanooni"
+- Copy the connection string in format: `postgresql://user:password@ep-xxxx.us-east-1.neon.tech/qanooni`
+- Store this as `DATABASE_URL` env variable in Replit secrets
+
+**Verification:**
+```bash
+psql "your_connection_string" -c "SELECT 1;" 
+# Should return: 1 ✓
+```
+
+---
+
+## **PHASE 2: Database Schema** (1 hour)
+
+### 2.1 Create Law Storage Tables
+
+Create file: `lib/db/src/schema/laws.ts`
+
+```typescript
+import {
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+  jsonb,
+  integer,
+  boolean,
+} from "drizzle-orm/pg-core";
+
+/**
+ * LAWS TABLE
+ * Stores the full text of each Jordanian law
+ * One row per law (e.g., Labor Law 8/1996)
+ */
+export const laws = pgTable("laws", {
+  id: serial("id").primaryKey(),
+  lawId: varchar("law_id", { length: 50 }).unique().notNull(), // "8/1996", "43/1976", etc.
+  arabicName: text("arabic_name").notNull(), // "قانون العمل"
+  englishName: text("english_name"), // "Labor Law"
+  year: varchar("year", { length: 4 }).notNull(), // "1996"
+  fullText: text("full_text").notNull(), // Entire law text in Arabic
+  articleCount: integer("article_count"), // Total number of articles
+  lastUpdated: timestamp("last_updated").notNull().defaultNow(), // When we last fetched
+  lobGovUrl: text("lob_gov_url"), // Direct link: https://lob.gov.jo/ar/law/8/1996
+  isActive: boolean("is_active").default(true), // True = currently in effect
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+/**
+ * LAW_VERSIONS TABLE
+ * Track all versions of a law (for amendment history)
+ * When law 8/1996 is amended in 2025, create a new version
+ */
+export const lawVersions = pgTable("law_versions", {
+  id: serial("id").primaryKey(),
+  lawId: varchar("law_id", { length: 50 }).notNull(), // "8/1996"
+  version: integer("version").notNull(), // 1, 2, 3 = amendment number
+  fullText: text("full_text").notNull(),
+  changesSummary: text("changes_summary"), // "Added articles 35-37, modified article 46"
+  amendmentDate: timestamp("amendment_date"), // When amendment was officially enacted
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+/**
+ * LAW_CHANGELOG TABLE
+ * Ultra-granular: tracks every single article change
+ * When Article 35 changes, create one row
+ */
+export const lawChangelog = pgTable("law_changelog", {
+  id: serial("id").primaryKey(),
+  lawId: varchar("law_id", { length: 50 }).notNull(), // "8/1996"
+  articleNumber: integer("article_number").notNull(), // 35
+  changeType: varchar("change_type", { length: 20 }).notNull(), // "added" | "modified" | "removed"
+  oldText: text("old_text"), // Previous text (null if "added")
+  newText: text("new_text"), // New text (null if "removed")
+  
+  // Which contract types are affected by this change
+  affectedContractTypes: jsonb("affected_contract_types").default([]), // ["employment", "service"]
+  
+  // Timestamps
+  detectedAt: timestamp("detected_at").defaultNow(), // When we detected the change
+  notified: boolean("notified").default(false), // Whether admin was alerted
+  acknowledgedAt: timestamp("acknowledged_at"), // When admin reviewed it
+});
+
+/**
+ * CONTRACT_LAW_MAPPINGS TABLE
+ * Maps each contract type to its relevant laws + articles
+ * "Which articles of which laws matter for employment contracts?"
+ */
+export const contractLawMappings = pgTable("contract_law_mappings", {
+  id: serial("id").primaryKey(),
+  contractType: varchar("contract_type", { length: 50 }).notNull(), // "employment", "rental", "service", "nda", "supplier"
+  lawId: varchar("law_id", { length: 50 }).notNull(), // "8/1996"
+  
+  // Array of article numbers: [15, 35, 46, 56, 57, 61, 65, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85]
+  relevantArticles: jsonb("relevant_articles").default([]),
+  
+  // 1 = primary law for this contract, 2 = supplementary
+  priority: integer("priority").default(1),
+  
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Export all tables
+export default {
+  laws,
+  lawVersions,
+  lawChangelog,
+  contractLawMappings,
+};
+```
+
+### 2.2 Update `lib/db/src/schema/index.ts`
+
+Replace the entire file with:
+
+```typescript
+export * from "./laws";
+// If you have other schema files, export them too
+```
+
+### 2.3 Run Database Migrations
+
+```bash
+# In project root:
+pnpm --filter @workspace/db run push
+
+# Expected output:
+# ✓ Created table "laws"
+# ✓ Created table "law_versions"
+# ✓ Created table "law_changelog"
+# ✓ Created table "contract_law_mappings"
+# ✓ All tables synchronized
+```
+
+---
+
+## **PHASE 3: Law Scraper Implementation** (2 hours)
+
+### 3.1 Create Scraper File
+
+Create file: `lib/integrations/src/lob-gov-jo-scraper.ts`
+
+```typescript
+import axios, { AxiosInstance } from "axios";
+import * as cheerio from "cheerio";
+import { db } from "@workspace/db";
+import {
+  laws,
+  lawVersions,
+  lawChangelog,
+  contractLawMappings,
+} from "@workspace/db";
+import { eq, desc } from "drizzle-orm";
+
+/**
+ * LobGovJoScraper
+ * 
+ * Fetches Jordanian laws from https://lob.gov.jo
+ * Detects changes automatically
+ * Updates database with new versions
+ */
+export class LobGovJoScraper {
+  private baseUrl = "https://lob.gov.jo";
+  private http: AxiosInstance;
+
+  // Mapping of contract types to their relevant Jordanian laws
+  private contractToLaws = {
+    employment: [
+      { lawId: "8/1996", name: "قانون العمل", priority: 1 },
+    ],
+    rental: [
+      { lawId: "43/1976", name: "القانون المدني", priority: 1 },
+      { lawId: "11/1994", name: "قانون الإيجار العقاري", priority: 1 },
+    ],
+    service: [
+      { lawId: "43/1976", name: "القانون المدني", priority: 1 },
+    ],
+    nda: [
+      { lawId: "43/1976", name: "القانون المدني", priority: 1 },
+    ],
+    supplier: [
+      { lawId: "43/1976", name: "القانون المدني", priority: 1 },
+      { lawId: "12/1966", name: "قانون التجارة", priority: 2 },
+    ],
+  };
+
+  constructor() {
+    this.http = axios.create({
+      baseURL: this.baseUrl,
+      timeout: 10000,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      },
+    });
+  }
+
+  /**
+   * MAIN ENTRY POINT
+   * Call this once on app startup, then schedule to run weekly
+   */
+  async updateAllLaws(): Promise<void> {
+    console.log("[LobGovScraper] Starting law update cycle...");
+
+    const laws_to_fetch = [
+      { lawId: "8/1996", name: "قانون العمل" },
+      { lawId: "43/1976", name: "القانون المدني" },
+      { lawId: "11/1994", name: "قانون الإيجار العقاري" },
+      { lawId: "12/1966", name: "قانون التجارة" },
+    ];
+
+    for (const law of laws_to_fetch) {
+      try {
+        console.log(`[LobGovScraper] Fetching ${law.lawId} (${law.name})...`);
+        await this.fetchAndStoreLaw(law.lawId, law.name);
+      } catch (error) {
+        console.error(
+          `[LobGovScraper] Failed to fetch ${law.lawId}:`,
+          error
+        );
+        // Continue to next law, don't crash
+      }
+    }
+
+    console.log("[LobGovScraper] Law update cycle complete");
+  }
+
+  /**
+   * Fetch a single law from lob.gov.jo and store it
+   */
+  private async fetchAndStoreLaw(lawId: string, arabicName: string): Promise<void> {
+    // Construct URL: https://lob.gov.jo/ar/law/8/1996
+    const [number, year] = lawId.split("/");
+    const lawUrl = `${this.baseUrl}/ar/law/${number}/${year}`;
+
+    console.log(`[LobGovScraper] Fetching from: ${lawUrl}`);
+
+    // Fetch the page
+    const response = await this.http.get(lawUrl);
+    const newText = this.extractLawText(response.data);
+
+    if (!newText || newText.trim().length < 200) {
+      console.warn(`[LobGovScraper] Failed to extract text from ${lawId}`);
+      return;
+    }
+
+    // Get existing law from database
+    const existingLaw = await db
+      .select()
+      .from(laws)
+      .where(eq(laws.lawId, lawId))
+      .limit(1);
+
+    if (existingLaw.length === 0) {
+      // NEW LAW: Insert it
+      console.log(`[LobGovScraper] ${lawId} is new, inserting...`);
+      const articleCount = this.countArticles(newText);
+
+      await db.insert(laws).values({
+        lawId,
+        arabicName,
+        year: year,
+        fullText: newText,
+        articleCount: articleCount,
+        lastUpdated: new Date(),
+        lobGovUrl: lawUrl,
+        isActive: true,
+      });
+
+      console.log(`[LobGovScraper] ✓ ${lawId} inserted (${articleCount} articles)`);
+    } else {
+      // EXISTING LAW: Check if changed
+      const oldText = existingLaw[0].fullText;
+
+      if (newText === oldText) {
+        console.log(`[LobGovScraper] ${lawId} unchanged, skipping`);
+        return;
+      }
+
+      // TEXT CHANGED: Detect specific article changes
+      console.log(`[LobGovScraper] ${lawId} has changes, analyzing...`);
+      await this.recordLawChanges(lawId, oldText, newText);
+
+      // Update the law record
+      await db
+        .update(laws)
+        .set({
+          fullText: newText,
+          lastUpdated: new Date(),
+          articleCount: this.countArticles(newText),
+        })
+        .where(eq(laws.lawId, lawId));
+
+      console.log(`[LobGovScraper] ✓ ${lawId} updated`);
+    }
+  }
+
+  /**
+   * Extract law text from HTML page
+   * Adjust selectors if lob.gov.jo changes structure
+   */
+  private extractLawText(html: string): string {
+    const $ = cheerio.load(html);
+
+    // Try multiple selectors (lob.gov.jo structure may vary)
+    let text =
+      $(".law-content").text() ||
+      $(".law-text").text() ||
+      $("main").text() ||
+      $("article").text() ||
+      $(".content").text();
+
+    if (!text) {
+      console.warn("[LobGovScraper] No law content found, trying backup method");
+      text = $("body").text();
+    }
+
+    // Clean whitespace
+    text = text
+      .replace(/\s+/g, " ") // Multiple spaces → single space
+      .replace(/[\n\r]+/g, "\n") // Normalize line breaks
+      .trim();
+
+    return text;
+  }
+
+  /**
+   * Parse law text and detect article-level changes
+   */
+  private async recordLawChanges(
+    lawId: string,
+    oldText: string,
+    newText: string
+  ): Promise<void> {
+    const oldArticles = this.extractArticles(oldText);
+    const newArticles = this.extractArticles(newText);
+
+    let changesDetected = 0;
+
+    // Find affected contract types for this law
+    const affectedTypes = Object.entries(this.contractToLaws)
+      .filter(([_, laws]) => laws.some((l) => l.lawId === lawId))
+      .map(([type, _]) => type);
+
+    // ADDED articles
+    for (const [articleNum, newArticleText] of Object.entries(newArticles)) {
+      if (!oldArticles[articleNum]) {
+        console.log(
+          `[LobGovScraper]   • Article ${articleNum}: ADDED`
+        );
+        await db.insert(lawChangelog).values({
+          lawId,
+          articleNumber: parseInt(articleNum),
+          changeType: "added",
+          newText: newArticleText,
+          affectedContractTypes: affectedTypes,
+          detectedAt: new Date(),
+        });
+        changesDetected++;
+      }
+    }
+
+    // MODIFIED articles
+    for (const [articleNum, oldArticleText] of Object.entries(oldArticles)) {
+      const newArticleText = newArticles[articleNum];
+      if (newArticleText && oldArticleText !== newArticleText) {
+        console.log(
+          `[LobGovScraper]   • Article ${articleNum}: MODIFIED`
+        );
+        await db.insert(lawChangelog).values({
+          lawId,
+          articleNumber: parseInt(articleNum),
+          changeType: "modified",
+          oldText: oldArticleText,
+          newText: newArticleText,
+          affectedContractTypes: affectedTypes,
+          detectedAt: new Date(),
+        });
+        changesDetected++;
+      }
+    }
+
+    // REMOVED articles
+    for (const [articleNum] of Object.entries(oldArticles)) {
+      if (!newArticles[articleNum]) {
+        console.log(
+          `[LobGovScraper]   • Article ${articleNum}: REMOVED`
+        );
+        await db.insert(lawChangelog).values({
+          lawId,
+          articleNumber: parseInt(articleNum),
+          changeType: "removed",
+          oldText: oldArticles[articleNum],
+          affectedContractTypes: affectedTypes,
+          detectedAt: new Date(),
+        });
+        changesDetected++;
+      }
+    }
+
+    console.log(
+      `[LobGovScraper] Found ${changesDetected} article changes in ${lawId}`
+    );
+  }
+
+  /**
+   * Extract individual articles from law text
+   * Articles are formatted: "المادة 15: ..."
+   * Returns: { "15": "...", "16": "...", ... }
+   */
+  private extractArticles(lawText: string): Record<string, string> {
+    const articleRegex = /المادة\s+(\d+)\s*:\s*(.+?)(?=المادة\s+\d+|$)/gs;
+    const articles: Record<string, string> = {};
+
+    let match;
+    while ((match = articleRegex.exec(lawText)) !== null) {
+      const articleNum = match[1];
+      const articleText = match[2].trim();
+      articles[articleNum] = articleText;
+    }
+
+    return articles;
+  }
+
+  /**
+   * Count total articles in law
+   */
+  private countArticles(lawText: string): number {
+    const articleRegex = /المادة\s+(\d+)\s*:/g;
+    let count = 0;
+    while (articleRegex.exec(lawText) !== null) {
+      count++;
+    }
+    return count;
+  }
+
+  /**
+   * Initialize contract-to-law mappings
+   * Call once after laws are loaded
+   */
+  async initializeContractLawMappings(): Promise<void> {
+    console.log("[LobGovScraper] Initializing contract-law mappings...");
+
+    const mappings = [
+      // Employment contracts
+      {
+        contractType: "employment",
+        lawId: "8/1996",
+        relevantArticles: [15, 35, 46, 56, 57, 61, 65, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85],
+        priority: 1,
+      },
+      // Rental contracts
+      {
+        contractType: "rental",
+        lawId: "43/1976",
+        relevantArticles: [192, 193, 194, 195, 196, 197, 198, 199, 200],
+        priority: 1,
+      },
+      {
+        contractType: "rental",
+        lawId: "11/1994",
+        relevantArticles: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        priority: 1,
+      },
+      // Service contracts
+      {
+        contractType: "service",
+        lawId: "43/1976",
+        relevantArticles: [750, 751, 752, 753, 754, 755],
+        priority: 1,
+      },
+      // NDAs
+      {
+        contractType: "nda",
+        lawId: "43/1976",
+        relevantArticles: [143, 144, 145],
+        priority: 1,
+      },
+      // Supplier contracts
+      {
+        contractType: "supplier",
+        lawId: "43/1976",
+        relevantArticles: [300, 301, 302, 303, 304],
+        priority: 1,
+      },
+      {
+        contractType: "supplier",
+        lawId: "12/1966",
+        relevantArticles: [1, 2, 3, 4, 5],
+        priority: 2,
+      },
+    ];
+
+    for (const mapping of mappings) {
+      await db.insert(contractLawMappings).values(mapping);
+    }
+
+    console.log("[LobGovScraper] ✓ Contract-law mappings initialized");
+  }
+}
+
+// Export singleton instance
+export const lobGovScraper = new LobGovJoScraper();
+```
+
+### 3.2 Test the Scraper
+
+Create file: `lib/integrations/src/test-scraper.ts` (temporary testing file)
+
+```typescript
+import { lobGovScraper } from "./lob-gov-jo-scraper";
+
+async function test() {
+  console.log("Testing LobGovScraper...");
+  try {
+    await lobGovScraper.updateAllLaws();
+    await lobGovScraper.initializeContractLawMappings();
+    console.log("✓ Scraper test passed");
+  } catch (error) {
+    console.error("✗ Scraper test failed:", error);
+  }
+}
+
+test();
+```
+
+Run test:
+```bash
+pnpm tsx lib/integrations/src/test-scraper.ts
+```
+
+**Expected output:**
+```
+[LobGovScraper] Starting law update cycle...
+[LobGovScraper] Fetching 8/1996 (قانون العمل)...
+[LobGovScraper] Fetching from: https://lob.gov.jo/ar/law/8/1996
+[LobGovScraper] ✓ Labor Law inserted (85 articles)
+[LobGovScraper] Initializing contract-law mappings...
+[LobGovScraper] ✓ Contract-law mappings initialized
+```
+
+---
+
+## **PHASE 4: RAG Retriever Implementation** (1 hour)
+
+### 4.1 Create RAG Retriever
+
+Create file: `lib/integrations/src/rag-law-retriever.ts`
+
+```typescript
+import { db } from "@workspace/db";
+import { laws, contractLawMappings } from "@workspace/db";
+import { eq, asc } from "drizzle-orm";
+
+export type ContractType =
+  | "employment"
+  | "rental"
+  | "service"
+  | "nda"
+  | "supplier";
+
+/**
+ * RAG (Retrieval-Augmented Generation) Law Retriever
+ * 
+ * For each contract type, fetches ONLY relevant laws + articles
+ * from database, formatted and ready to inject into AI prompts
+ */
+export class RagLawRetriever {
+  /**
+   * Main method: Get all relevant laws for a contract type
+   * Returns formatted Arabic text ready for Claude
+   */
+  async getRelevantLawsForContractType(
+    contractType: ContractType
+  ): Promise<string> {
+    console.log(`[RAG] Retrieving laws for contract type: ${contractType}`);
+
+    // Step 1: Get law mappings for this contract type
+    const mappings = await db
+      .select()
+      .from(contractLawMappings)
+      .where(eq(contractLawMappings.contractType, contractType))
+      .orderBy(asc(contractLawMappings.priority));
+
+    if (mappings.length === 0) {
+      console.warn(
+        `[RAG] No law mappings found for contract type: ${contractType}`
+      );
+      return ""; // Fallback: no laws found
+    }
+
+    console.log(
+      `[RAG] Found ${mappings.length} law mapping(s) for ${contractType}`
+    );
+
+    // Step 2: For each law mapping, fetch law + extract relevant articles
+    let legalContext = "=== المراجع القانونية ===\n\n";
+    let lawsCount = 0;
+
+    for (const mapping of mappings) {
+      try {
+        const law = await db
+          .select()
+          .from(laws)
+          .where(eq(laws.lawId, mapping.lawId))
+          .limit(1);
+
+        if (!law || law.length === 0) {
+          console.warn(
+            `[RAG] Law not found in database: ${mapping.lawId}. Run scraper first.`
+          );
+          continue;
+        }
+
+        lawsCount++;
+
+        // Extract relevant articles
+        const relevantText = this.extractArticles(
+          law[0].fullText,
+          mapping.relevantArticles as number[]
+        );
+
+        legalContext += `\n📋 ${law[0].arabicName} (${mapping.lawId})\n`;
+        legalContext += `الروابط ذات الصلة: ${(mapping.relevantArticles as number[]).join(", ")}\n`;
+        legalContext += "─".repeat(50) + "\n";
+        legalContext += relevantText;
+        legalContext += "\n";
+      } catch (error) {
+        console.error(
+          `[RAG] Error retrieving law ${mapping.lawId}:`,
+          error
+        );
+      }
+    }
+
+    legalContext += `\n[تم استرجاع ${lawsCount} قانون(ين) بنجاح من قاعدة البيانات]`;
+
+    console.log(
+      `[RAG] Generated legal context (${legalContext.length} characters)`
+    );
+    return legalContext;
+  }
+
+  /**
+   * Extract specific articles from full law text
+   * If articleNumbers is empty, returns entire law
+   */
+  private extractArticles(
+    lawText: string,
+    articleNumbers: number[]
+  ): string {
+    // If no specific articles requested, return full law
+    if (articleNumbers.length === 0) {
+      return lawText;
+    }
+
+    // Parse law text for articles
+    const articleRegex = /المادة\s+(\d+)\s*:\s*(.+?)(?=المادة\s+\d+|$)/gs;
+    const extractedArticles: string[] = [];
+    let match;
+
+    while ((match = articleRegex.exec(lawText)) !== null) {
+      const articleNum = parseInt(match[1]);
+
+      // Only include articles we care about
+      if (articleNumbers.includes(articleNum)) {
+        extractedArticles.push(`المادة ${articleNum}:\n${match[2].trim()}`);
+      }
+    }
+
+    if (extractedArticles.length === 0) {
+      console.warn(
+        `[RAG] Could not find any articles ${articleNumbers.join(", ")} in law text`
+      );
+      return lawText; // Fallback to full text
+    }
+
+    return extractedArticles.join("\n\n");
+  }
+
+  /**
+   * Alternative: Get all laws of a certain type (not filtered by article)
+   * Useful for comprehensive context
+   */
+  async getAllLawsForContractType(contractType: ContractType): Promise<string> {
+    const mappings = await db
+      .select()
+      .from(contractLawMappings)
+      .where(eq(contractLawMappings.contractType, contractType));
+
+    let context = "";
+
+    for (const mapping of mappings) {
+      const law = await db
+        .select()
+        .from(laws)
+        .where(eq(laws.lawId, mapping.lawId))
+        .limit(1);
+
+      if (law.length > 0) {
+        context += `\n\n${law[0].arabicName}\n${"=".repeat(50)}\n${law[0].fullText}`;
+      }
+    }
+
+    return context;
+  }
+}
+
+// Export singleton instance
+export const ragRetriever = new RagLawRetriever();
+```
+
+### 4.2 Export RAG Retriever
+
+Update `lib/integrations/src/index.ts`:
+
+```typescript
+export * from "./rag-law-retriever";
+export { ragRetriever } from "./rag-law-retriever";
+export { lobGovScraper } from "./lob-gov-jo-scraper";
+```
+
+---
+
+## **PHASE 5: Update Contract Generation Routes** (1 hour)
+
+### 5.1 Update Employment Contract Route
+
+Edit: `artifacts/api-server/src/routes/contracts/index.ts`
+
+**Find this section:**
+```typescript
+async function buildEmploymentPrompt(data: GenerateContractBodyType) {
+  // ... existing code ...
+  // It currently has: const lawText = JORDAN_LABOR_LAW_FULL;
+}
+```
+
+**Replace with:**
+```typescript
+import { ragRetriever } from "@workspace/integrations";
+
+async function buildEmploymentPrompt(data: GenerateContractBodyType) {
+  // Instead of hardcoded law, fetch latest from database
+  const lawText = await ragRetriever.getRelevantLawsForContractType(
+    "employment"
+  );
+
+  // Rest of the prompt building logic stays the same
+  const prompt = `
+أنت كاتب عدل قانوني أردني متخصص في صياغة عقود العمل
+
+${STRICT_RULES_BASE}
+
+لا تستخدم أي معرفة خاصة بك. استخدم فقط القوانين المرفقة أدناه:
+
+${lawText}
+
+الآن قم بصياغة عقد عمل كامل بناءً على البيانات التالية:
+- اسم صاحب العمل: ${data.employerName}
+- اسم الموظف: ${data.employeeName}
+- الراتب الشهري: ${data.monthlySalary} دينار أردني
+- تاريخ البدء: ${data.startDate}
+- نوع التوظيف: ${data.employmentType}
+- فترة الاختبار: ${data.probationPeriodDays} يوم
+- إجازة سنوية: ${data.annualLeaveDays} يوم
+
+ابدأ العقد مباشرة بـ "عقد العمل" دون أي مقدمة.
+`;
+
+  return prompt;
+}
+```
+
+### 5.2 Update Rental Contract Route
+
+In the same file, find `buildRentalPrompt` and update:
+
+```typescript
+async function buildRentalPrompt(data: RentalBodyType) {
+  const lawText = await ragRetriever.getRelevantLawsForContractType("rental");
+  
+  const prompt = `
+أنت محامٍ أردني متخصص في العقود...
+
+${lawText}
+
+قم بصياغة عقد إيجار...
+`;
+  
+  return prompt;
+}
+```
+
+### 5.3 Update All Other Contract Routes
+
+Repeat the pattern for:
+- `buildServicePrompt` → `ragRetriever.getRelevantLawsForContractType("service")`
+- `buildNdaPrompt` → `ragRetriever.getRelevantLawsForContractType("nda")`
+- `buildSupplierPrompt` → `ragRetriever.getRelevantLawsForContractType("supplier")`
+
+---
+
+## **PHASE 6: Setup Periodic Scraper (30 minutes)**
+
+### 6.1 Create Scheduler
+
+Create file: `artifacts/api-server/src/lib/law-update-scheduler.ts`
+
+```typescript
+import * as cron from "node-cron";
+import { lobGovScraper } from "@workspace/integrations";
+import { logger } from "./logger";
+
+/**
+ * Schedule law updates to run:
+ * Every Monday at 2:00 AM (Jordan time)
+ */
+export function scheduleLawUpdates() {
+  // Cron expression: 0 2 * * 1
+  // Minute: 0
+  // Hour: 2
+  // Day of month: * (every day)
+  // Month: * (every month)
+  // Day of week: 1 (Monday)
+
+  const job = cron.schedule("0 2 * * 1", async () => {
+    logger.info("[Scheduler] Starting weekly law update at 2:00 AM");
+
+    try {
+      await lobGovScraper.updateAllLaws();
+      logger.info("[Scheduler] ✓ Law update completed successfully");
+    } catch (error) {
+      logger.error("[Scheduler] ✗ Law update failed:", error);
+    }
+  });
+
+  // Also run once on startup
+  (async () => {
+    logger.info("[Startup] Running initial law sync...");
+    try {
+      await lobGovScraper.updateAllLaws();
+      logger.info("[Startup] ✓ Initial law sync completed");
+    } catch (error) {
+      logger.error("[Startup] ✗ Initial law sync failed:", error);
+    }
+  })();
+
+  logger.info("[Scheduler] Law update scheduler initialized (runs Mondays 2 AM)");
+
+  return job;
+}
+```
+
+### 6.2 Start Scheduler on App Startup
+
+Edit: `artifacts/api-server/src/app.ts`
+
+Add at the end of the file, before exporting:
+
+```typescript
+import { scheduleLawUpdates } from "./lib/law-update-scheduler";
+
+// ... existing middleware and routes ...
+
+// Initialize law update scheduler
+if (process.env.NODE_ENV !== "test") {
+  scheduleLawUpdates();
+}
+
+export default app;
+```
+
+---
+
+## **PHASE 7: Admin Endpoints for Law Changes** (45 minutes)
+
+### 7.1 Create Admin Routes
+
+Create file: `artifacts/api-server/src/routes/admin/law-changes.ts`
+
+```typescript
+import { Router } from "express";
+import { db } from "@workspace/db";
+import { lawChangelog, laws } from "@workspace/db";
+import { eq, desc, isNull } from "drizzle-orm";
+import { logger } from "../../lib/logger";
+
+const router = Router();
+
+/**
+ * GET /api/admin/law-changes/pending
+ * Get all unnotified law changes
+ * Requires: admin role (implement auth check)
+ */
+router.get("/pending", async (req, res) => {
+  // TODO: Add auth check
+  // if (req.user?.role !== "admin") return res.status(403).json({ error: "Forbidden" });
+
+  try {
+    const unnotifiedChanges = await db
+      .select()
+      .from(lawChangelog)
+      .where(isNull(lawChangelog.acknowledgedAt))
+      .orderBy(desc(lawChangelog.detectedAt));
+
+    // Group by law
+    const grouped = new Map<string, (typeof unnotifiedChanges)[]>();
+    for (const change of unnotifiedChanges) {
+      const key = change.lawId;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key)!.push(change);
+    }
+
+    // Format for frontend
+    const result = [];
+    for (const [lawId, changes] of grouped.entries()) {
+      const lawRecord = await db
+        .select()
+        .from(laws)
+        .where(eq(laws.lawId, lawId))
+        .limit(1);
+
+      result.push({
+        lawId,
+        lawName: lawRecord[0]?.arabicName || lawId,
+        changesCount: changes.length,
+        affectedContractTypes: [
+          ...new Set(changes.flatMap((c) => c.affectedContractTypes || [])),
+        ],
+        lastChangeAt: changes[0]?.detectedAt,
+        details: changes.map((c) => ({
+          id: c.id,
+          article: c.articleNumber,
+          type: c.changeType, // "added" | "modified" | "removed"
+          oldText: c.oldText ? c.oldText.substring(0, 150) : null,
+          newText: c.newText ? c.newText.substring(0, 150) : null,
+          detectedAt: c.detectedAt,
+        })),
+      });
+    }
+
+    return res.json({
+      unreviewed: result.length,
+      laws: result,
+    });
+  } catch (error) {
+    logger.error("[Admin] Error fetching law changes:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * POST /api/admin/law-changes/:changeId/acknowledge
+ * Mark a change as reviewed
+ */
+router.post("/:changeId/acknowledge", async (req, res) => {
+  try {
+    const changeId = parseInt(req.params.changeId);
+
+    await db
+      .update(lawChangelog)
+      .set({ acknowledgedAt: new Date(), notified: true })
+      .where(eq(lawChangelog.id, changeId));
+
+    logger.info(`[Admin] Law change ${changeId} acknowledged`);
+
+    return res.json({ success: true });
+  } catch (error) {
+    logger.error("[Admin] Error acknowledging law change:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * GET /api/admin/law-changes/history
+ * Get all law changes (reviewed + unreviewed)
+ */
+router.get("/history", async (req, res) => {
+  try {
+    const allChanges = await db
+      .select()
+      .from(lawChangelog)
+      .orderBy(desc(lawChangelog.detectedAt));
+
+    return res.json({
+      total: allChanges.length,
+      changes: allChanges,
+    });
+  } catch (error) {
+    logger.error("[Admin] Error fetching law history:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+export default router;
+```
+
+### 7.2 Register Admin Routes
+
+Edit: `artifacts/api-server/src/routes/index.ts`
+
+Add:
+
+```typescript
+import lawChangesRouter from "./admin/law-changes";
+
+// ... existing routes ...
+
+// Admin routes
+router.use("/admin/law-changes", lawChangesRouter);
+```
+
+---
+
+## **PHASE 8: Frontend Admin Dashboard** (1 hour)
+
+### 8.1 Create Admin Page
+
+Create file: `artifacts/legal-ai/src/pages/admin/LawUpdates.tsx`
+
+```typescript
+import { useEffect, useState } from "react";
+import { AlertCircle, CheckCircle, Zap } from "lucide-react";
+
+interface LawChange {
+  id: number;
+  article: number;
+  type: "added" | "modified" | "removed";
+  oldText?: string;
+  newText?: string;
+  detectedAt: string;
+}
+
+interface LawUpdate {
+  lawId: string;
+  lawName: string;
+  changesCount: number;
+  affectedContractTypes: string[];
+  lastChangeAt: string;
+  details: LawChange[];
+}
+
+export function LawUpdatesAdmin() {
+  const [updates, setUpdates] = useState<LawUpdate[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [acknowledged, setAcknowledged] = useState<number[]>([]);
+
+  useEffect(() => {
+    fetchPendingChanges();
+  }, []);
+
+  async function fetchPendingChanges() {
+    try {
+      const res = await fetch("/api/admin/law-changes/pending");
+      const data = await res.json();
+      setUpdates(data.laws || []);
+    } catch (error) {
+      console.error("Failed to fetch law changes:", error);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function acknowledgeChange(changeId: number) {
+    try {
+      await fetch(`/api/admin/law-changes/${changeId}/acknowledge`, {
+        method: "POST",
+      });
+      setAcknowledged([...acknowledged, changeId]);
+      // Refresh
+      fetchPendingChanges();
+    } catch (error) {
+      console.error("Failed to acknowledge change:", error);
+    }
+  }
+
+  if (loading) return <div className="p-6 text-center">جاري التحميل...</div>;
+
+  return (
+    <div dir="rtl" className="p-6 bg-gray-50 min-h-screen">
+      <div className="max-w-5xl mx-auto">
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">
+            📋 تحديثات القوانين
+          </h1>
+          <p className="text-gray-600">
+            تابع أحدث التغييرات في القوانين الأردنية
+          </p>
+        </div>
+
+        {/* Summary */}
+        <div className="bg-white rounded-lg shadow p-6 mb-6">
+          <div className="flex items-center gap-3 mb-4">
+            <Zap className="w-6 h-6 text-yellow-500" />
+            <h2 className="text-xl font-semibold">
+              {updates.length} تحديث غير مراجع
+            </h2>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {updates.flatMap((u) => u.affectedContractTypes).map((type) => (
+              <span
+                key={type}
+                className="bg-blue-100 text-blue-800 px-3 py-1 rounded text-sm"
+              >
+                {type}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* Law Changes */}
+        {updates.length === 0 ? (
+          <div className="bg-white rounded-lg shadow p-12 text-center">
+            <CheckCircle className="w-16 h-16 text-green-500 mx-auto mb-4" />
+            <p className="text-gray-600 text-lg">جميع التحديثات تمت مراجعتها</p>
+          </div>
+        ) : (
+          updates.map((lawUpdate) => (
+            <div
+              key={lawUpdate.lawId}
+              className="bg-white rounded-lg shadow mb-6 overflow-hidden"
+            >
+              {/* Law Header */}
+              <div className="bg-gradient-to-r from-blue-500 to-blue-600 text-white p-6">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <h3 className="text-2xl font-bold">{lawUpdate.lawName}</h3>
+                    <p className="text-blue-100 mt-1">({lawUpdate.lawId})</p>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-3xl font-bold">
+                      {lawUpdate.changesCount}
+                    </div>
+                    <p className="text-blue-100">تغييرات</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Affected Contract Types */}
+              <div className="bg-blue-50 px-6 py-3 border-b border-blue-200">
+                <p className="text-sm font-semibold text-blue-900 mb-2">
+                  العقود المتأثرة:
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {lawUpdate.affectedContractTypes.map((type) => (
+                    <span
+                      key={type}
+                      className="bg-blue-200 text-blue-900 px-3 py-1 rounded text-sm font-medium"
+                    >
+                      {type}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Individual Changes */}
+              <div className="divide-y">
+                {lawUpdate.details.map((change) => (
+                  <div key={change.id} className="p-6 hover:bg-gray-50">
+                    {/* Article Type Badge */}
+                    <div className="flex items-start justify-between mb-4">
+                      <h4 className="font-semibold text-lg">
+                        المادة {change.article}
+                      </h4>
+                      <span
+                        className={`px-3 py-1 rounded text-sm font-semibold ${
+                          change.type === "added"
+                            ? "bg-green-100 text-green-800"
+                            : change.type === "modified"
+                              ? "bg-yellow-100 text-yellow-800"
+                              : "bg-red-100 text-red-800"
+                        }`}
+                      >
+                        {change.type === "added"
+                          ? "✕ جديد"
+                          : change.type === "modified"
+                            ? "≈ معدل"
+                            : "⊖ محذوف"}
+                      </span>
+                    </div>
+
+                    {/* Old vs New Text */}
+                    {change.oldText && (
+                      <div className="mb-3 p-3 bg-red-50 border-r-4 border-red-500 rounded">
+                        <p className="text-xs text-red-600 font-semibold mb-1">
+                          النص السابق:
+                        </p>
+                        <p className="text-sm text-red-700 line-through">
+                          {change.oldText}...
+                        </p>
+                      </div>
+                    )}
+
+                    {change.newText && (
+                      <div className="mb-3 p-3 bg-green-50 border-r-4 border-green-500 rounded">
+                        <p className="text-xs text-green-600 font-semibold mb-1">
+                          النص الجديد:
+                        </p>
+                        <p className="text-sm text-green-700">
+                          {change.newText}...
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Detected Time */}
+                    <p className="text-xs text-gray-500 mt-2">
+                      تم الكشف: {new Date(change.detectedAt).toLocaleDateString("ar-JO")}
+                    </p>
+
+                    {/* Acknowledge Button */}
+                    {!acknowledged.includes(change.id) && (
+                      <button
+                        onClick={() => acknowledgeChange(change.id)}
+                        className="mt-4 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded font-semibold transition"
+                      >
+                        تم الاستعراض
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+### 8.2 Add Route to Router
+
+Edit: `artifacts/legal-ai/src/App.tsx`
+
+```typescript
+import { LawUpdatesAdmin } from "./pages/admin/LawUpdates";
+
+// Add to routes:
+<Route path="/admin/law-updates" element={<LawUpdatesAdmin />} />
+```
+
+---
+
+## **PHASE 9: Testing & Verification** (1 hour)
+
+### 9.1 Manual Testing Script
+
+Create: `lib/integrations/src/test-full-rag.ts`
+
+```typescript
+import { lobGovScraper } from "./lob-gov-jo-scraper";
+import { ragRetriever } from "./rag-law-retriever";
+import { db } from "@workspace/db";
+import { laws, lawChangelog } from "@workspace/db";
+
+async function runFullTest() {
+  console.log("═".repeat(60));
+  console.log("🧪 FULL RAG SYSTEM TEST");
+  console.log("═".repeat(60));
+
+  try {
+    // Step 1: Scrape laws
+    console.log("\n📥 Step 1: Fetching laws from lob.gov.jo...");
+    await lobGovScraper.updateAllLaws();
+    await lobGovScraper.initializeContractLawMappings();
+
+    // Step 2: Check database
+    console.log("\n📊 Step 2: Checking database...");
+    const lawsCount = await db.select().from(laws);
+    console.log(`   ✓ Found ${lawsCount.length} laws in database`);
+
+    const changesCount = await db.select().from(lawChangelog);
+    console.log(`   ✓ Found ${changesCount.length} law changes detected`);
+
+    // Step 3: Test RAG retrieval
+    console.log("\n🔍 Step 3: Testing RAG retrieval...");
+    const contractTypes = [
+      "employment",
+      "rental",
+      "service",
+      "nda",
+      "supplier",
+    ] as const;
+
+    for (const contractType of contractTypes) {
+      const context = await ragRetriever.getRelevantLawsForContractType(
+        contractType
+      );
+      const charCount = context.length;
+      console.log(
+        `   ✓ ${contractType}: ${charCount} characters of legal context`
+      );
+    }
+
+    // Step 4: Simulate law change
+    console.log("\n🔔 Step 4: Simulating law change detection...");
+    const changes = changesCount.filter(
+      (c) => c.changeType === "modified"
+    );
+    if (changes.length > 0) {
+      const change = changes[0];
+      console.log(
+        `   ✓ Found ${change.changeType} in ${change.lawId} Article ${change.articleNumber}`
+      );
+      console.log(
+        `   ✓ Affected types: ${change.affectedContractTypes?.join(", ")}`
+      );
+    }
+
+    console.log("\n" + "═".repeat(60));
+    console.log("✅ ALL TESTS PASSED");
+    console.log("═".repeat(60));
+  } catch (error) {
+    console.error("\n❌ TEST FAILED:", error);
+    process.exit(1);
+  }
+}
+
+runFullTest();
+```
+
+Run test:
+```bash
+pnpm tsx lib/integrations/src/test-full-rag.ts
+```
+
+---
+
+## **PHASE 10: Production Checklist** ✅
+
+Before going live, verify:
+
+- [ ] Neon database created and `DATABASE_URL` set
+- [ ] All law storage tables created (`pnpm --filter @workspace/db run push`)
+- [ ] Scraper successfully fetches at least 1 law
+- [ ] RAG retriever returns formatted legal context
+- [ ] Contract generation routes updated to use `ragRetriever`
+- [ ] Law update scheduler starts on app boot
+- [ ] Admin endpoints functional (`GET /api/admin/law-changes/pending`)
+- [ ] Admin dashboard displays pending changes
+- [ ] Scraper tested: runs without errors
+- [ ] No hardcoded law text in contract routes (all use RAG)
+
+---
+
+## **PHASE 11: Monitoring & Maintenance** 📈
+
+After deployment, monitor:
+
+```typescript
+// Check last scraper run
+SELECT MAX(last_updated) FROM laws;
+
+// Count pending law changes
+SELECT COUNT(*) FROM law_changelog WHERE acknowledged_at IS NULL;
+
+// Identify slowest queries
+EXPLAIN ANALYZE SELECT * FROM contract_law_mappings WHERE contract_type = 'employment';
+```
+
+---
+
+## **FINAL NOTES** 📝
+
+1. **Database migration to GCP:** When ready, simply export from Neon and import to GCP:
+   ```bash
+   pg_dump neon_url > backup.sql
+   psql gcp_url < backup.sql
+   ```
+
+2. **Handling lob.gov.jo API changes:** If their website structure changes, update `extractLawText()` method in scraper
+
+3. **Performance:** For large law texts (>100KB), consider chunking articles into separate database rows
+
+4. **Accuracy:** Always verify extracted articles match the official lob.gov.jo text
+
+5. **Future enhancement:** Add semantic search using `pgvector` embeddings for more intelligent article matching
+
+---
+
+**You are now ready to build the future of Arabic legal AI.** 🚀
+
+Execute this prompt section by section. After each phase, test before moving to the next.
