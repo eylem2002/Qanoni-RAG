@@ -1,6 +1,25 @@
 import { lobGovScraper } from "@workspace/integrations";
 import { logger } from "./logger";
 
+async function runLawSync(label: string): Promise<void> {
+  logger.info(`[${label}] Running law sync...`);
+  try {
+    await lobGovScraper.initialize();
+    await lobGovScraper.updateAllLaws();
+    await lobGovScraper.initializeContractLawMappings();
+    await lobGovScraper.shutdown();
+    logger.info(`[${label}] Law sync completed`);
+  } catch (error) {
+    logger.error({ error }, `[${label}] Law sync failed`);
+    // Always shut down browser on error to avoid leaks
+    try {
+      await lobGovScraper.shutdown();
+    } catch {
+      // ignore
+    }
+  }
+}
+
 function scheduleWeeklyUpdate() {
   const MONDAY = 1;
   const TARGET_HOUR = 2;
@@ -18,13 +37,7 @@ function scheduleWeeklyUpdate() {
     const delay = msUntilNextMonday2am();
     logger.info({ delayMs: delay }, "[Scheduler] Next law sync scheduled");
     setTimeout(async () => {
-      logger.info("[Scheduler] Starting weekly law update");
-      try {
-        await lobGovScraper.updateAllLaws();
-        logger.info("[Scheduler] Weekly law update completed");
-      } catch (error) {
-        logger.error({ error }, "[Scheduler] Weekly law update failed");
-      }
+      await runLawSync("Scheduler");
       scheduleNext();
     }, delay);
   }
@@ -33,17 +46,7 @@ function scheduleWeeklyUpdate() {
 }
 
 export function scheduleLawUpdates(): void {
-  (async () => {
-    logger.info("[Startup] Running initial law sync...");
-    try {
-      await lobGovScraper.updateAllLaws();
-      await lobGovScraper.initializeContractLawMappings();
-      logger.info("[Startup] Initial law sync completed");
-    } catch (error) {
-      logger.error({ error }, "[Startup] Initial law sync failed");
-    }
-  })();
-
+  // Run initial sync in background (non-blocking)
+  void runLawSync("Startup");
   scheduleWeeklyUpdate();
-  logger.info("[Scheduler] Law update scheduler initialized (runs Mondays 2 AM)");
 }

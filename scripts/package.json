@@ -5,7 +5,11 @@
   "type": "module",
   "scripts": {
     "hello": "tsx ./src/hello.ts",
+    "discover-law-ids": "tsx ./src/discover-law-ids.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "puppeteer-core": "^25.0.4"
   },
   "devDependencies": {
     "@types/node": "catalog:",

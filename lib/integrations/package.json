@@ -10,7 +10,8 @@
     "@workspace/db": "workspace:*",
     "axios": "^1.9.0",
     "cheerio": "^1.1.0",
-    "drizzle-orm": "catalog:"
+    "drizzle-orm": "catalog:",
+    "puppeteer-core": "^25.0.4"
   },
   "devDependencies": {
     "@types/node": "catalog:"
