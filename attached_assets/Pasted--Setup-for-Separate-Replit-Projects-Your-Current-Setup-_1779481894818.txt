@@ -1,0 +1,340 @@
+# Setup for Separate Replit Projects
+
+## Your Current Setup
+
+```
+Replit Project 1: Law System
+├── artifacts/api-server/
+│   └── src/routes/
+│       ├── health.ts
+│       ├── admin-law-changes.ts
+│       └── (NO /rag endpoint yet)
+├── lib/
+│   ├── db/
+│   └── integrations/
+
+Replit Project 2: Contract System
+├── artifacts/api-server/
+│   └── src/routes/contracts/
+├── artifacts/legal-ai/
+│   └── src/pages/
+├── lib/
+│   ├── db/
+│   └── integrations-anthropic-ai/
+```
+
+**Problem:** They're separate monorepos. You can't use a shared `lib/law-client` package.
+
+**Solution:** Copy the client code directly into the contract system.
+
+---
+
+## The Plan (Modified for Separate Projects)
+
+Instead of 5 phases, you have **4 phases**:
+
+### Phase 1: Build RAG Endpoint (Law System) — 2 hours
+**Location:** Your Law System Replit Project  
+**File to create:** `artifacts/api-server/src/routes/rag.ts`  
+**Same as before** — build `/api/rag/retrieve` endpoint
+
+### Phase 2: Skip Shared Library ✋
+**Why:** Can't easily share packages across separate Replit projects  
+**Instead:** Copy the client code directly into Contract System
+
+### Phase 3: Copy Client Code into Contract System — 30 mins
+**Location:** Your Contract System Replit Project  
+**File to create:** `artifacts/api-server/src/lib/law-client.ts`  
+**What:** Copy the three functions from `AGENT_HANDOFF_PROMPT.md` Phase 2 directly into this file
+
+### Phase 4: Update Contract Routes — 2 hours
+**Location:** Your Contract System Replit Project  
+**Same as before** — call the law system API
+
+---
+
+## Step-by-Step: Separate Projects
+
+### Step 1: Get Law System URL
+
+In your Law System Replit:
+1. Run the project (click "Run")
+2. You'll see a URL like: `https://law-system-abc123.replit.dev`
+3. **Copy this URL** — you'll need it
+
+Your API endpoint is:
+```
+https://law-system-abc123.replit.dev/api/rag/retrieve
+```
+
+### Step 2: Build RAG Endpoint (Law System Project)
+
+Follow **Phase 1** from `AGENT_HANDOFF_PROMPT.md` exactly:
+- Create `artifacts/api-server/src/routes/rag.ts`
+- Copy the code from the prompt
+- Register it in your router
+- Test: `curl "https://law-system-abc123.replit.dev/api/rag/retrieve?contractType=employment"`
+
+**When it works:** You see JSON with articles ✅
+
+### Step 3: Create Client Code (Contract System Project)
+
+In your Contract System Replit, create this file:
+
+**File:** `artifacts/api-server/src/lib/law-client.ts`
+
+**Content:** Copy this entire code block:
+
+```typescript
+// Client for retrieving articles from the law system
+// This code talks to the separate Law System Replit project
+
+export interface RagArticle {
+  lawId: string;
+  lawNameAr: string;
+  articleNumber: number;
+  text: string;
+  priority: 1 | 2;
+  lastUpdated: string;
+}
+
+export interface RagRetrievalResult {
+  contractType: string;
+  lawVersionIds: string[];
+  articleCount: number;
+  articles: RagArticle[];
+  retrievedAt: string;
+  disclaimer: string;
+}
+
+/**
+ * Main function: Query the law system for articles
+ * Call this from contract generation routes
+ */
+export async function retrieveArticlesForContract(
+  contractType: string,
+  lawSystemBaseUrl: string = process.env.LAW_SYSTEM_URL || "http://localhost:8080"
+): Promise<RagRetrievalResult> {
+  const url = new URL(`${lawSystemBaseUrl}/api/rag/retrieve`);
+  url.searchParams.set("contractType", contractType);
+
+  const response = await fetch(url.toString());
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to retrieve articles: ${response.status} ${response.statusText}`
+    );
+  }
+
+  return response.json() as Promise<RagRetrievalResult>;
+}
+
+/**
+ * Helper: Format articles into a text block for embedding in prompts
+ */
+export function formatArticlesForPrompt(articles: RagArticle[]): string {
+  const sections = Array.from(
+    new Map(articles.map(a => [a.lawId, []])).entries()
+  );
+
+  let result = "النصوص القانونية الحالية:\n\n";
+
+  for (const [lawId, _] of sections) {
+    const lawArticles = articles.filter(a => a.lawId === lawId);
+    const lawName = lawArticles[0]?.lawNameAr || lawId;
+
+    result += `${lawName} (رقم ${lawId}):\n`;
+    for (const article of lawArticles) {
+      result += `\nالمادة ${article.articleNumber}:\n${article.text}\n`;
+    }
+    result += "\n" + "─".repeat(50) + "\n\n";
+  }
+
+  return result;
+}
+
+/**
+ * Helper: Extract version info for storing with contracts
+ */
+export function extractLawVersionInfo(result: RagRetrievalResult): {
+  lawVersionIds: string[];
+  retrievedAt: string;
+} {
+  return {
+    lawVersionIds: result.lawVersionIds,
+    retrievedAt: result.retrievedAt,
+  };
+}
+```
+
+**Done.** That's your client code, living in the contract system.
+
+### Step 4: Update .env (Contract System Project)
+
+In your Contract System Replit, create or update `.env`:
+
+```
+LAW_SYSTEM_URL=https://law-system-abc123.replit.dev
+```
+
+Replace `law-system-abc123.replit.dev` with your actual law system URL.
+
+### Step 5: Update Contract Routes (Contract System Project)
+
+In `artifacts/api-server/src/routes/contracts/index.ts`:
+
+**At the top, add the import:**
+```typescript
+import {
+  retrieveArticlesForContract,
+  formatArticlesForPrompt,
+} from "../lib/law-client";
+```
+
+**In the employment contract route (`POST /api/contracts/generate`), replace this:**
+```typescript
+const prompt = `
+  أنت كاتب عدل قانوني أردني...
+  المرجع القانوني:
+  ${JORDAN_LABOR_LAW_FULL}
+  ...
+`;
+```
+
+**With this:**
+```typescript
+// Try to get live articles from law system
+let articlesText = JORDAN_LABOR_LAW_FULL;
+
+try {
+  const ragResult = await retrieveArticlesForContract("employment");
+  articlesText = formatArticlesForPrompt(ragResult.articles);
+} catch (error) {
+  req.log.warn("Failed to retrieve articles from law system, using fallback", {
+    error: (error as Error).message,
+  });
+  validationWarnings.push(
+    "تحذير: تم استخدام نصوص قانونية محفوظة لأن نظام القوانين غير متاح."
+  );
+}
+
+const prompt = `
+  أنت كاتب عدل قانوني أردني...
+  المرجع القانوني:
+  ${articlesText}
+  ...
+`;
+```
+
+**Repeat for the other 4 contract types** (rental, service, nda, supplier).
+
+---
+
+## Testing
+
+### Test Law System API (in Law System Replit)
+```bash
+curl "https://law-system-abc123.replit.dev/api/rag/retrieve?contractType=employment"
+```
+
+Should return 200 with articles.
+
+### Test Contract System (in Contract System Replit)
+1. Start the contract system
+2. Submit an employment contract form
+3. Check the API logs — you should see the call to law system
+4. Contract should generate with live law text
+
+---
+
+## Fallback Behavior (Still Works!)
+
+If law system is down:
+- ✅ Contract generation still works
+- ✅ Uses hardcoded `JORDAN_LABOR_LAW_FULL`
+- ✅ User sees warning
+
+---
+
+## Important Differences from Unified Monorepo
+
+| Setup | Advantage | Disadvantage |
+|-------|-----------|--------------|
+| **Unified Monorepo** | Share code easily | More complex deployment |
+| **Separate Projects** (yours) | Independent, simple | Duplicate client code |
+
+With separate projects, you're copying the client code once. If the law system API changes, you update the client code in the contract system. That's it.
+
+---
+
+## File Locations (Separate Projects)
+
+```
+LAW SYSTEM REPLIT PROJECT:
+  artifacts/api-server/src/routes/rag.ts ← Phase 1
+
+CONTRACT SYSTEM REPLIT PROJECT:
+  artifacts/api-server/src/lib/law-client.ts ← Phase 3 (client code)
+  artifacts/api-server/src/routes/contracts/index.ts ← Phase 4 (integration)
+  .env ← Add LAW_SYSTEM_URL
+```
+
+---
+
+## Your Action Plan
+
+**Do this in order:**
+
+1. ✅ **In Law System project:**
+   - Create `rag.ts` with RAG endpoint
+   - Test: `curl "https://your-law-system-url/api/rag/retrieve?contractType=employment"`
+
+2. ✅ **In Contract System project:**
+   - Create `.env` with `LAW_SYSTEM_URL=https://your-law-system-url`
+   - Create `artifacts/api-server/src/lib/law-client.ts` with client code
+   - Update contract routes to use the client
+
+3. ✅ **Test end-to-end:**
+   - Submit contract form
+   - Verify law system is called
+   - Verify contract uses live law text
+
+---
+
+## Troubleshooting
+
+### Law system endpoint returns 404
+- Check URL is correct in `.env`
+- Check `/api/rag/retrieve` endpoint exists in law system
+- Test with curl first
+
+### Contract system can't reach law system
+- Law system might be sleeping (Replit free tier)
+- Click "Run" on law system to wake it up
+- Check `.env` has correct URL (including https://)
+
+### Getting CORS errors
+- Law system needs `cors()` middleware (already in express setup)
+- Should not be an issue with separate projects
+
+### Law system URL keeps changing
+- Replit URLs are stable once running
+- But they change after each restart
+- Update `.env` if needed
+
+---
+
+## Next Steps
+
+1. Open Law System Replit project
+2. Create `artifacts/api-server/src/routes/rag.ts` (Phase 1)
+3. Get your law system URL
+4. Open Contract System Replit project
+5. Add `.env` with law system URL
+6. Create `law-client.ts` (Phase 3)
+7. Update contract routes (Phase 4)
+8. Test
+
+**Total time: ~4-5 hours**
+
+No shared library complications. Everything is isolated and simple.
