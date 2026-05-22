@@ -6,3 +6,9 @@ id = "b-IHk4ZS5n1VFpT4lRB_q"
 uri = "file://SYSTEM_DOCUMENTATION.md"
 type = "text"
 title = "Qanooni AI — Full System Documentation"
+
+[[outputs]]
+id = "sdWP1-rx8pyTdtYQrDYnZ"
+uri = "file://HANDOFF_ANSWERS.md"
+type = "text"
+title = "Developer Handoff Q&A — All 100+ Questions Answered"

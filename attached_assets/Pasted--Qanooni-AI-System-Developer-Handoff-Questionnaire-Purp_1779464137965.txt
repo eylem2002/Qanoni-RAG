@@ -1,0 +1,306 @@
+# Qanooni AI System — Developer Handoff Questionnaire
+
+> **Purpose:** Critical questions to ask the original developer before they hand off the system. Covers design decisions, known issues, testing, deployment, and future constraints.
+
+---
+
+## 1. THE FALSE POSITIVE CHANGES MYSTERY 🔴
+
+### 1.1 Civil Law Rendering Noise
+- **The symptom:** Between two scrapes, 17 articles in قانون المدني showed as "modified" (articles 5, 50, 53, 60, 449, etc.) but the legal team likely didn't see any actual law changes on lob.gov.jo.
+- **Q1.1.1:** Did you manually verify these 17 "changes" on lob.gov.jo's website? Are they real legal amendments, or rendering/whitespace noise?
+- **Q1.1.2:** Have you ever run the scraper twice in succession (same day, no time between runs) and checked if the same articles show as "changed" again?
+- **Q1.1.3:** The `normalize()` function in `extractArticles()` collapses whitespace with `/[ \t]+/g` and blank lines with `/\n{3,}/g`. Are there other sources of variation you discovered?
+  - Inconsistent punctuation?
+  - Trailing spaces in article text?
+  - The "ارتباطات المادة" links rendering differently?
+- **Q1.1.4:** If these are false positives, what's the best way to fix it without accidentally missing real changes?
+
+### 1.2 Change Detection Confidence
+- **Q1.2.1:** How confident are you that the current regex for parsing article boundaries is 100% correct? Have you tested it against all 2,295 articles manually?
+- **Q1.2.2:** Are there any articles in the 4 laws that have:
+  - No article heading (missing "المادة X")?
+  - Malformed headings?
+  - Nested or conditional article structures?
+- **Q1.2.3:** The regex assumes "المادة X" format. What if lob.gov.jo changes the heading format in the future?
+
+---
+
+## 2. PUPPETEER & CHROMIUM 🔧
+
+### 2.1 The Critical Homepage Warmup
+- **Q2.1.1:** You discovered that skipping the homepage warmup causes wrong content to load. Was this a one-off bug on a specific day, or does it happen *every time* without the warmup?
+- **Q2.1.2:** Have you tested navigating directly to a law URL (without homepage warmup) in a fresh browser session? Did you see the same wrong-content issue?
+- **Q2.1.3:** The 3-second pause after `networkidle0` — is 3 seconds the minimum, or is there headroom? What happens if you use 1 second? 2 seconds?
+- **Q2.1.4:** Why does Angular's RSA session initialization require hitting the homepage? Is there a way to initialize the session programmatically via JavaScript without navigating?
+
+### 2.2 Chromium Process Management
+- **Q2.2.1:** Have you run `ps aux | grep chromium` during a scrape to see how many processes spawn? Is it 1, 5, 10?
+- **Q2.2.2:** If a law fails mid-scrape (e.g., timeout), does the `finally` block always execute, or are there edge cases where the browser leaks?
+- **Q2.2.3:** The `--single-process` flag reduces memory. Have you measured memory usage with/without it? What's the peak RAM during a full scrape?
+- **Q2.2.4:** Replit sometimes restarts the Nix environment. When that happens, does the Chromium path discovery gracefully fall through to the next option, or does the scraper crash?
+
+### 2.3 Content Verification Thresholds
+- **Q2.3.1:** The 8,000-character threshold for `body.innerText` — how was this number chosen? Did you test it against all 4 laws to find the minimum real law size?
+- **Q2.3.2:** What if lob.gov.jo loads the page shell (with "رقم التشريع") but the actual article text is still loading? Could the 8,000 check pass prematurely?
+- **Q2.3.3:** The 45-second timeout on `waitForFunction` — have you ever hit this timeout? What does the error handling do if it times out?
+
+---
+
+## 3. LOBLAWS.GOV.JO SPECIFICS 🌐
+
+### 3.1 Law Discovery & IDs
+- **Q3.1.1:** How did you discover the 4 law IDs? Did you exhaustively search the site, or did the legal team provide them?
+- **Q3.1.2:** Are there other laws on lob.gov.jo that the system *should* monitor but doesn't yet? (Constitutional law, tax law, criminal law, etc.)
+- **Q3.1.3:** The `LegislationID` vs. display `law_id` distinction — have you ever accidentally used the wrong ID in a query? How do you prevent this?
+- **Q3.1.4:** The `LegislationType=2` parameter — you say it doesn't filter server-side but is required by Angular. Have you tested removing it?
+
+### 3.2 Website Changes & Stability
+- **Q3.2.1:** How often does lob.gov.jo change its UI, endpoint structure, or HTML rendering? Is this a stable government site, or does it change frequently?
+- **Q3.2.2:** Have you ever experienced:
+  - lob.gov.jo being down during a scheduled scrape?
+  - Rate limiting (429 errors)?
+  - Session resets mid-scrape?
+- **Q3.2.3:** The RSA encryption — is this a security feature, or just obfuscation? Can you intercept the key exchange and decrypt the API calls?
+- **Q3.2.4:** If lob.gov.jo's Angular framework updates and changes the CSS selectors, how quickly would you know? Is there a way to monitor for this?
+
+### 3.3 The Old Rental Law Mystery
+- **Q3.3.1:** You discovered that ID 3408 was originally thought to be قانون الإيجار العقاري (1994) but is actually قانون الملكية العقارية (2019). How did you discover this? Did the legal team tell you, or did you investigate manually?
+- **Q3.3.2:** Is the 1994 rental law archived anywhere, or is it completely gone from lob.gov.jo?
+- **Q3.3.3:** Should the system keep a historical record of laws that were removed from lob.gov.jo?
+
+---
+
+## 4. DATABASE DESIGN 🗄️
+
+### 4.1 Schema & Normalization
+- **Q4.1.1:** Why store `full_text` in the same `laws` table instead of a separate `law_texts` table? Is it a query performance choice?
+- **Q4.1.2:** The `law_versions` table stores snapshots. Do you ever query the history to calculate diffs between non-consecutive versions (e.g., version 3 vs. version 5)?
+- **Q4.1.3:** The `law_changelog.affected_contract_types` is a JSONB array. Have you considered a separate `changeset_contract_types` junction table for easier querying?
+- **Q4.1.4:** Is there ever a need to know *why* a change was made (amendment reason, legislative intent)? Should there be a `change_reason` or `legislative_reference` field?
+
+### 4.2 Indexing & Performance
+- **Q4.2.1:** What indexes exist on the database? (law_id, article_number, change_type, acknowledged_at, etc.)
+- **Q4.2.2:** The `full_text` column can be 277 KB. Do you have a query performance issue if a user tries to fetch all laws at once?
+- **Q4.2.3:** As the changelog grows (after 1 year = ~52 scrapes), will the `law_changelog` table become slow to query?
+
+### 4.3 Data Integrity
+- **Q4.3.1:** What happens if a scrape partially completes? (e.g., 3 of 4 laws succeed, 1 fails) Does the database get into an inconsistent state?
+- **Q4.3.2:** Is there a backup/restore procedure? If the database gets corrupted, how do you recover?
+- **Q4.3.3:** The `law_versions` table preserves history. How long do you keep versions? (Forever? 1 year? 2 years?)
+
+---
+
+## 5. API & FRONTEND 🎯
+
+### 5.1 Authentication & Authorization
+- **Q5.1.1:** The admin dashboard has no login. How is it protected in production? (IP whitelist? VPN? OAuth?)
+- **Q5.1.2:** Who has permission to click "Mark as reviewed"? Is there a role-based access control, or can anyone see and acknowledge changes?
+- **Q5.1.3:** If a reviewer accidentally clicks "Mark as reviewed" on the wrong change, can they undo it? Is there an audit log?
+
+### 5.2 API Contract & Code Generation
+- **Q5.2.1:** The OpenAPI spec is the source of truth. Is it auto-generated from the Express routes, or hand-written and kept in sync manually?
+- **Q5.2.2:** Have you versioned the API? (e.g., `/api/v1/` or `/api/v2/`)
+- **Q5.2.3:** The generated React Query hooks — do you regenerate them on every deploy, or only when the OpenAPI spec changes?
+- **Q5.2.4:** Is there a way to test the API against the OpenAPI spec (e.g., with Dredd or OpenAPI test tools)?
+
+### 5.3 Frontend UX & RTL
+- **Q5.3.1:** The Tajawal font — is it Google Fonts or self-hosted? What's the fallback if it doesn't load?
+- **Q5.3.2:** The side-by-side diff on the Pending Reviews page — in RTL mode, which side shows old text (red) and which shows new (green)? Is this intuitive for Arabic readers?
+- **Q5.3.3:** Have you tested the dashboard on mobile? The sidebar might collapse on small screens — does the layout still make sense?
+- **Q5.3.4:** The "Recently Monitored Laws" panel lists laws, but does the legal team actually use this, or is it just decoration?
+
+### 5.4 Error Handling
+- **Q5.4.1:** If the API server crashes, what happens to the scheduled scrape? Does it resume on restart?
+- **Q5.4.2:** If PostgreSQL is down but the API is running, what happens when someone tries to view the dashboard?
+- **Q5.4.3:** Have you tested the system's behavior when lob.gov.jo returns a 500 error mid-scrape?
+
+---
+
+## 6. SCHEDULER & CRON 📅
+
+### 6.1 Startup Behavior
+- **Q6.1.1:** "The server immediately runs `runLawSync("Startup")` in the background (non-blocking)." How long does a full scrape take? Is 30 seconds? 2 minutes? 10 minutes?
+- **Q6.1.2:** If the startup scrape is still running when the first user hits the API, do they get stale data from the previous deploy?
+- **Q6.1.3:** If the startup scrape fails, does the server still start and serve API requests? Or does it crash?
+
+### 6.2 Weekly Scheduling
+- **Q6.2.1:** "Monday at 2:00 AM" — in what timezone? Amman time (EAT)? UTC?
+- **Q6.2.2:** If the Replit instance is restarted on Tuesday, does the next scrape happen the following Monday, or is the schedule lost?
+- **Q6.2.3:** Have you considered using a proper job queue (Bull, RabbitMQ) instead of `setTimeout`? What would trigger a change?
+
+### 6.3 Failure Handling
+- **Q6.3.1:** If a weekly scrape fails, does the system retry, or does it just skip that week and try again next Monday?
+- **Q6.3.2:** Have you set up any alerting for failed scrapes? (Slack, email, PagerDuty?)
+- **Q6.3.3:** The legal team needs to know: "Did the system successfully check for changes this week?" How do they verify this?
+
+---
+
+## 7. TESTING & QUALITY ASSURANCE 🧪
+
+### 7.1 Test Coverage
+- **Q7.1.1:** Do you have automated tests for the scraper? If so, do they:
+  - Mock lob.gov.jo (local test server)?
+  - Use recorded HTTP responses (VCR/Polly)?
+  - Actually hit lob.gov.jo in CI?
+- **Q7.1.2:** Is there a test for the article parsing regex? Have you tested it against edge cases (missing articles, malformed headings)?
+- **Q7.1.3:** Have you load-tested the API? What's the maximum QPS it can handle?
+
+### 7.2 Manual Testing Procedures
+- **Q7.2.1:** What's the procedure to manually test a full scrape before deploying?
+- **Q7.2.2:** How do you test the scheduler without waiting 1 week? Can you manually trigger a scrape?
+- **Q7.2.3:** Have you ever tested a scrape that partially fails (1 of 4 laws fails) to verify the database doesn't get corrupted?
+
+### 7.3 Regression Testing
+- **Q7.3.1:** If you add a new law to monitor, how do you verify it doesn't break the scraping of the existing 4 laws?
+- **Q7.3.2:** If you update the text normalization, how do you ensure you haven't accidentally started missing real changes?
+
+---
+
+## 8. DEPLOYMENT & OPERATIONS 🚀
+
+### 8.1 Deployment Process
+- **Q8.1.1:** What's the deployment process? (Git push → Replit auto-deploys? Manual `npm run build`?)
+- **Q8.1.2:** When you deploy, does the startup scrape run immediately, or do you manually trigger it?
+- **Q8.1.3:** Is there a way to deploy the API server without deploying the frontend, or vice versa?
+
+### 8.2 Monitoring & Observability
+- **Q8.2.1:** What logs do you have? (Scraper logs, API logs, database query logs?)
+- **Q8.2.2:** Can you view historical logs? (Last scrape's output? Error messages from 2 weeks ago?)
+- **Q8.2.3:** Do you monitor:
+  - Scrape duration over time?
+  - API response times?
+  - Database connection pool usage?
+  - Chromium process count?
+
+### 8.3 Incident Response
+- **Q8.3.1:** If the scraper gets stuck (hangs, doesn't complete), how do you kill it and restart?
+- **Q8.3.2:** If the database gets into an inconsistent state, what's the recovery procedure?
+- **Q8.3.3:** If lob.gov.jo changes and breaks the scraper, how quickly can you diagnose and fix it?
+
+---
+
+## 9. INTEGRATION WITH QANOONI'S MAIN SYSTEM 🔗
+
+### 9.1 RAG Pipeline Connection
+- **Q9.1.1:** How does the contract generation pipeline currently retrieve laws? (Does it query this system, or does it have its own law database?)
+- **Q9.1.2:** When you marked sections for "Connecting to the RAG Pipeline," did you actually test retrieving articles via SQL? Does the query work?
+- **Q9.1.3:** The `contract_law_mappings` table lists "relevant_articles" — how precise is this mapping? Are there edge cases where an article is relevant but not listed?
+
+### 9.2 Data Freshness SLA
+- **Q9.2.1:** If a law changes on Monday morning, the scraper won't detect it until Monday 2 AM next week. Is this acceptable? Should it be daily or on-demand?
+- **Q9.2.2:** If a legal team member notices a law change on lob.gov.jo and wants to immediately update the system, can they trigger a manual scrape?
+
+### 9.3 Versioning for AI
+- **Q9.3.1:** If a generated contract was based on Article 75 as of May 2026, and Article 75 changes in June 2026, how does the system know the contract is now invalid?
+- **Q9.3.2:** Should generated contracts store a "law_version_id" or "timestamp" so you can audit which law version was used?
+
+---
+
+## 10. TECHNICAL DEBT & SHARP EDGES ⚠️
+
+### 10.1 Known Issues
+- **Q10.1.1:** Beyond the 3 issues listed in the documentation, are there other known issues you didn't document?
+- **Q10.1.2:** Have you encountered any race conditions? (e.g., a user viewing changes while a scrape is in progress?)
+- **Q10.1.3:** Is there any code you wrote that you know is fragile and should be rewritten?
+
+### 10.2 Shortcuts & Hacks
+- **Q10.2.1:** Are there any hardcoded values (IP addresses, timeouts, law IDs) that should be configurable?
+- **Q10.2.2:** Are there any `.ts-ignore` or `// TODO` comments in the code? What do they say?
+- **Q10.2.3:** Is the error handling adequate, or are there silent failures?
+
+### 10.3 Security Concerns
+- **Q10.3.1:** The dashboard has no authentication. Is this intentional? Should there be a login?
+- **Q10.3.2:** Are there any SQL injection vulnerabilities? (Drizzle ORM should prevent this, but have you audited?)
+- **Q10.3.3:** Should sensitive data (law text, change diffs) be encrypted at rest or in transit?
+
+---
+
+## 11. FUTURE ROADMAP 🗺️
+
+### 11.1 Feature Requests
+- **Q11.1.1:** Has the legal team requested any features you didn't implement? (Export to PDF? Email notifications? Integration with legal research tools?)
+- **Q11.1.2:** Should the system support monitoring laws from other countries (Syria, Egypt, UAE)?
+- **Q11.1.3:** Should the system detect *related* articles and highlight dependencies? (e.g., "Article 75 references Article 60, which also changed"?)
+
+### 11.2 Performance & Scalability
+- **Q11.2.1:** What's the plan when you add 20, 50, or 100 laws? Will the 2-hour scrape time become problematic?
+- **Q11.2.2:** Should the scraper be distributed (multiple workers, each handling 1 law) instead of sequential?
+- **Q11.2.3:** As the changelog grows to millions of records, will the queries become slow?
+
+### 11.3 Legal Team Feedback
+- **Q11.3.1:** Have you shown the system to the Qanooni legal team? What's their feedback?
+- **Q11.3.2:** Are the change notifications useful, or do they feel like spam?
+- **Q11.3.3:** Is the "Mark as reviewed" workflow intuitive, or should there be a more complex review process (approve, reject, request changes)?
+
+---
+
+## 12. DOCUMENTATION & KNOWLEDGE TRANSFER 📚
+
+### 12.1 Code Comments
+- **Q12.1.1:** Are there comments explaining *why* specific design decisions were made? (Not just *what* the code does.)
+- **Q12.1.2:** The Chromium discovery logic and homepage warmup are critical. Are they well-documented?
+
+### 12.2 Runbooks & Procedures
+- **Q12.2.1:** Is there a runbook for:
+  - Adding a new law?
+  - Debugging a failed scrape?
+  - Restoring from a database backup?
+  - Rolling back a bad deployment?
+- **Q12.2.2:** If you get sick tomorrow, what are the first 3 things the next person needs to know?
+
+### 12.3 Contact & Escalation
+- **Q12.3.1:** If the system breaks and nobody knows how to fix it, who should they contact?
+- **Q12.3.2:** Is there a Slack channel or mailing list for this system?
+
+---
+
+## 13. MISC / GOTCHAS 🤷
+
+### 13.1 Replit-Specific
+- **Q13.1.1:** The system runs on Replit. Are there any Replit-specific gotchas? (Nix flakes, environment variables, Secrets management?)
+- **Q13.1.2:** If Replit shuts down or changes pricing, is there a migration path to AWS/GCP/Azure?
+
+### 13.2 Dependency Management
+- **Q13.2.1:** `puppeteer-core` must stay external in esbuild. Have you tested that it still works after bundling with esbuild?
+- **Q13.2.2:** How often do you update dependencies? Is there a schedule, or do you wait until there's a security patch?
+- **Q13.2.3:** Have you tested the system with the latest versions of all major dependencies?
+
+### 13.3 Regex & Parsing Edge Cases
+- **Q13.3.1:** Are there any articles with:
+  - Subsections? (1a, 1b, etc.)?
+  - Footnotes or endnotes?
+  - Tables or structured data?
+  - Non-standard numbering?
+- **Q13.3.2:** The regex assumes Arabic numerals (1, 2, 3). Does lob.gov.jo ever use Arabic-Indic numerals (١, ٢, ٣)?
+
+---
+
+## 14. FINAL THOUGHTS 💭
+
+### 14.1 Biggest Risks
+- **Q14.1.1:** If you had to rank the top 3 risks that could break this system, what are they?
+- **Q14.1.2:** What would be the impact if the system was down for 1 week? 1 month?
+
+### 14.2 What You'd Do Differently
+- **Q14.2.1:** If you were to rebuild this system from scratch, what would you do differently?
+- **Q14.2.2:** Are there any architectural decisions you regret?
+
+### 14.3 Hand-Off Confidence
+- **Q14.3.1:** On a scale of 1–10, how confident are you that the next person can maintain and extend this system?
+- **Q14.3.2:** What's the single most important thing for them to understand?
+
+---
+
+## BONUS: Demo & Walkthrough 🎬
+
+### Before they leave:
+1. **Live demo** — Watch them scrape a single law end-to-end, from homepage to database commit
+2. **Error case** — Kill the browser mid-scrape and show how it recovers
+3. **Dashboard walkthrough** — Show all 4 pages (Dashboard, Pending, Laws, History) and explain the UX
+4. **Database inspection** — Query the `law_changelog` table and show a real change record
+5. **Code walkthrough** — Walk through the scraper's main loop line-by-line
+
+---
+
+*This questionnaire is designed to surface unknown unknowns — the gaps between what's documented and what was learned through months of hands-on work. It's not meant to be exhaustive; add your own questions based on your specific concerns.*
