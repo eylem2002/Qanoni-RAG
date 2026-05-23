@@ -57,12 +57,12 @@ export default function HistoryLog() {
   }
 
   return (
-    <div className="p-8 max-w-5xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="p-4 md:p-8 max-w-5xl mx-auto space-y-5 md:space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-foreground">Change History</h1>
-          <p className="text-muted-foreground mt-2">
+          <h1 className="text-2xl md:text-3xl font-bold text-foreground">Change History</h1>
+          <p className="text-muted-foreground mt-1 md:mt-2 text-sm md:text-base">
             Complete audit trail of all law changes detected by the scraper.
           </p>
         </div>

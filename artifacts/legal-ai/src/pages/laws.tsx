@@ -7,11 +7,11 @@ export default function LawsList() {
   const { data, isLoading, isError } = useGetStoredLaws();
 
   return (
-    <div className="p-8 max-w-5xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex items-center justify-between">
+    <div className="p-4 md:p-8 max-w-5xl mx-auto space-y-6 md:space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <div className="flex items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-foreground">Law Registry</h1>
-          <p className="text-muted-foreground mt-2">All Jordanian laws currently stored and monitored in the system.</p>
+          <h1 className="text-2xl md:text-3xl font-bold text-foreground">Law Registry</h1>
+          <p className="text-muted-foreground mt-1 md:mt-2 text-sm md:text-base">All Jordanian laws currently stored and monitored in the system.</p>
         </div>
         {!isLoading && (
           <div className="flex items-center gap-2 text-muted-foreground text-sm font-mono bg-muted px-3 py-2 rounded-md">
@@ -45,7 +45,7 @@ export default function LawsList() {
             <div
               key={law.id}
               data-testid={`law-row-${law.id}`}
-              className="p-5 flex items-center justify-between gap-4 hover:bg-muted/30 transition-colors"
+              className="p-4 md:p-5 flex items-center justify-between gap-3 hover:bg-muted/30 transition-colors"
             >
               <div className="flex items-start gap-4 flex-1 min-w-0">
                 <div className="shrink-0 text-center">
