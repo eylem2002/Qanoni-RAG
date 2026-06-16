@@ -12,9 +12,19 @@ const router = Router();
  * cleanup endpoint to retroactively purge false-positive changelog records that
  * were stored before a given UI element was added to the scraper's strip list.
  */
-function stripUiChrome(text: string | null): string {
+function stripUiChrome(text: string | null, articleNumber?: number): string {
   if (!text) return "";
-  return text
+  let out = text;
+  // lob.gov.jo non-deterministically renders the article number twice, so a
+  // leaked "المادة N" heading sometimes ends up at the start of the stored
+  // body. Strip a leading repeat of THIS article's own heading (article-specific,
+  // mirroring extractArticles()) so identical text doesn't read as a change.
+  // Never strip a generic "المادة N" — that could remove a legitimate leading
+  // cross-reference and force a false equality.
+  if (articleNumber != null && Number.isFinite(articleNumber)) {
+    out = out.replace(new RegExp(`^\\s*المادة\\s+${articleNumber}\\b\\s*`), "");
+  }
+  return out
     .replace(/^تفسير\s+\d+\s*/gm, "")
     .replace(/^التشريعات المرتبطة\s+\d+\s*/gm, "")
     .replace(/^الاحكام القضائية\s+\d+\s*/gm, "")
@@ -133,8 +143,8 @@ router.post("/cleanup-false-positives", async (req, res) => {
       // Skip malformed rows — never act on a record missing either side.
       if (change.oldText == null || change.newText == null) continue;
 
-      const strippedOld = stripUiChrome(change.oldText);
-      const strippedNew = stripUiChrome(change.newText);
+      const strippedOld = stripUiChrome(change.oldText, change.articleNumber);
+      const strippedNew = stripUiChrome(change.newText, change.articleNumber);
 
       if (strippedOld === strippedNew) {
         await db.delete(lawChangelog).where(eq(lawChangelog.id, change.id));
@@ -151,8 +161,80 @@ router.post("/cleanup-false-positives", async (req, res) => {
       }
     }
 
-    req.log.info({ deleted, updated }, "[Admin] Cleaned up false-positive law changes");
-    return res.json({ success: true, deleted, updated, scanned: allChanges.length });
+    // ── Pass 2: flip-flop mirror pairs from scrape instability ───────────────
+    // The Angular SPA sometimes renders article bodies as the UI placeholder
+    // "تعديلات" (or shifts article boundaries, merging the appendix into one
+    // article). A bad scrape records X→Y for an article, then the next good
+    // scrape records Y→X — a perfect mirror.
+    //
+    // We only delete a reverse pair when it is high-confidence scrape noise, to
+    // avoid erasing a genuine legislative reversal (amendment then later
+    // rollback). A pair qualifies only when BOTH records are unacknowledged AND
+    // either:
+    //   (a) a side is a known corruption artifact (the "تعديلات" placeholder, or
+    //       empty after UI-chrome stripping), or
+    //   (b) the two detections are within 48h of each other — far shorter than
+    //       the weekly scrape cadence, so a real change + reversal (≥1 week
+    //       apart) is never caught here.
+    const PLACEHOLDER = "تعديلات";
+    const WINDOW_MS = 48 * 60 * 60 * 1000;
+    const isCorruptSide = (text: string, articleNumber: number): boolean => {
+      const t = text.trim();
+      return t === PLACEHOLDER || stripUiChrome(text, articleNumber) === "";
+    };
+
+    const remaining = await db
+      .select()
+      .from(lawChangelog)
+      .where(eq(lawChangelog.changeType, "modified"));
+
+    type Row = (typeof remaining)[number];
+    const byForward = new Map<string, Row>();
+    const flipFlopIds = new Set<number>();
+    for (const c of remaining) {
+      if (c.oldText == null || c.newText == null) continue;
+      const base = `${c.lawId}\u0000${c.articleNumber}\u0000`;
+      const reverseKey = base + c.newText + "\u0001" + c.oldText;
+      const mate = byForward.get(reverseKey);
+      if (mate && mate.oldText != null && mate.newText != null) {
+        const bothUnacked = c.acknowledgedAt == null && mate.acknowledgedAt == null;
+        const corrupt =
+          isCorruptSide(c.oldText, c.articleNumber) ||
+          isCorruptSide(c.newText, c.articleNumber) ||
+          isCorruptSide(mate.oldText, mate.articleNumber) ||
+          isCorruptSide(mate.newText, mate.articleNumber);
+        const withinWindow =
+          c.detectedAt != null &&
+          mate.detectedAt != null &&
+          Math.abs(
+            new Date(c.detectedAt).getTime() - new Date(mate.detectedAt).getTime()
+          ) <= WINDOW_MS;
+        if (bothUnacked && (corrupt || withinWindow)) {
+          flipFlopIds.add(c.id);
+          flipFlopIds.add(mate.id);
+        }
+      } else {
+        byForward.set(base + c.oldText + "\u0001" + c.newText, c);
+      }
+    }
+
+    let flipFlopDeleted = 0;
+    for (const id of flipFlopIds) {
+      await db.delete(lawChangelog).where(eq(lawChangelog.id, id));
+      flipFlopDeleted++;
+    }
+
+    req.log.info(
+      { deleted, updated, flipFlopDeleted },
+      "[Admin] Cleaned up false-positive law changes"
+    );
+    return res.json({
+      success: true,
+      deleted,
+      updated,
+      flipFlopDeleted,
+      scanned: allChanges.length,
+    });
   } catch (error) {
     req.log.error({ error }, "[Admin] Error cleaning up false positives");
     return res.status(500).json({ error: "Internal server error" });

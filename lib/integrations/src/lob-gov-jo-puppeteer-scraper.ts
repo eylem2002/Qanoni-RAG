@@ -310,6 +310,26 @@ export class LobGovJoPuppeteerScraper {
       );
     }
 
+    // ── Unstable-render assertion ────────────────────────────────────────────
+    // When the Angular SPA renders before its data fully hydrates, article
+    // bodies come back as the UI tab label "تعديلات" (the "amendments" tab)
+    // instead of the real article text. Committing such a parse poisons the
+    // corpus and produces flip-flop false-positive changes on the next good
+    // scrape. If any article body is just this placeholder, the render is bad —
+    // abort and keep the last good state.
+    const placeholderArticles = Object.entries(newArticles)
+      .filter(([, body]) => body.trim() === "تعديلات")
+      .map(([num]) => num);
+    if (placeholderArticles.length > 0) {
+      throw new Error(
+        `Safety check failed: ${placeholderArticles.length} article(s) for ${lawId} ` +
+          `rendered as the UI placeholder "تعديلات" (e.g. articles ${placeholderArticles
+            .slice(0, 5)
+            .join(", ")}). The page did not fully hydrate. ` +
+          `Refusing to commit to prevent data corruption.`
+      );
+    }
+
     const existing = await db
       .select()
       .from(laws)
@@ -519,7 +539,14 @@ export class LobGovJoPuppeteerScraper {
       const num = match[1];
       const rawText = match[2];
       if (num && rawText) {
-        const cleaned = this.stripUiElements(rawText);
+        // lob.gov.jo's Angular SPA non-deterministically renders the article
+        // number twice. The regex above consumes one "المادة N" heading, and the
+        // duplicate leaks into the captured body. Strip a leading repeat of THIS
+        // article's own heading so identical law text doesn't alternate between
+        // "with heading" / "without heading" and trigger false-positive changes.
+        const dupHeading = new RegExp(`^\\s*المادة\\s+${num}\\b\\s*`);
+        const body = rawText.replace(dupHeading, "");
+        const cleaned = this.stripUiElements(body);
         if (cleaned.length > 0) {
           articles[num] = cleaned;
         }
