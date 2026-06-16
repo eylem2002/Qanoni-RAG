@@ -19,7 +19,14 @@ description: lob.gov.jo injects UI counter elements into article body text; all 
 
 **How to apply:** Any time the site adds a new counter-style UI element and the next scrape produces a flood of "modified" entries with identical-looking text, check whether a new pattern needs to be added to `stripUiElements()`. The tell is: DB entries where `regexp_replace(new_text, '^<new_pattern>', '') = old_text`.
 
-## Cleanup procedure for new false positives
+## Cleaning PRODUCTION data (dev and prod DBs are separate)
+The dev database and the published app's production database are independent. Cleaning the dev DB has zero effect on what a user sees in the published app. The `executeSql` production environment is READ-ONLY (replica), so production rows cannot be deleted with it.
+
+**Rule:** to mutate production data, go through the deployed app, not the DB tool. A reusable admin endpoint `POST /api/admin/law-changes/cleanup-false-positives` performs the strip-and-purge; it must be DEPLOYED first, then invoked against the published `.replit.app` URL with Basic auth.
+
+**Why:** when a user reports a fix "not working" after you cleaned dev, suspect they are viewing the published app backed by the prod DB. Always confirm which DB the symptom lives in (read-only prod SELECT) before assuming the cleanup failed.
+
+## Cleanup procedure for new false positives (dev, direct SQL)
 ```sql
 -- 1. Delete pure false positives (only diff was the UI element)
 DELETE FROM law_changelog

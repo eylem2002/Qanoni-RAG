@@ -83,6 +83,7 @@ All admin endpoints require `Authorization: Basic base64(admin:<ADMIN_PASSWORD>)
 | GET | `/api/admin/law-changes/pending` | Unreviewed changes grouped by law |
 | GET | `/api/admin/law-changes/history` | Full change audit trail |
 | POST | `/api/admin/law-changes/:id/acknowledge` | Mark a change as reviewed |
+| POST | `/api/admin/law-changes/cleanup-false-positives` | Retroactively strip UI chrome and delete false-positive modified records (idempotent) |
 
 ## User preferences
 

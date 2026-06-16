@@ -6,6 +6,23 @@ import { getSyncState, triggerManualSync } from "../../lib/law-update-scheduler"
 
 const router = Router();
 
+/**
+ * Strip lob.gov.jo UI chrome from article text. Mirrors stripUiElements() in the
+ * scraper (lib/integrations/src/lob-gov-jo-puppeteer-scraper.ts). Used by the
+ * cleanup endpoint to retroactively purge false-positive changelog records that
+ * were stored before a given UI element was added to the scraper's strip list.
+ */
+function stripUiChrome(text: string | null): string {
+  if (!text) return "";
+  return text
+    .replace(/^تفسير\s+\d+\s*/gm, "")
+    .replace(/^التشريعات المرتبطة\s+\d+\s*/gm, "")
+    .replace(/^الاحكام القضائية\s+\d+\s*/gm, "")
+    .replace(/ارتباطات المادة\s*/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 router.get("/status", (_req, res) => {
   void res.json(getSyncState());
 });
@@ -98,6 +115,46 @@ router.get("/history", async (req, res) => {
     return res.json({ total: allChanges.length, changes: allChanges });
   } catch (error) {
     req.log.error({ error }, "[Admin] Error fetching law history");
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.post("/cleanup-false-positives", async (req, res) => {
+  try {
+    const allChanges = await db
+      .select()
+      .from(lawChangelog)
+      .where(eq(lawChangelog.changeType, "modified"));
+
+    let deleted = 0;
+    let updated = 0;
+
+    for (const change of allChanges) {
+      // Skip malformed rows — never act on a record missing either side.
+      if (change.oldText == null || change.newText == null) continue;
+
+      const strippedOld = stripUiChrome(change.oldText);
+      const strippedNew = stripUiChrome(change.newText);
+
+      if (strippedOld === strippedNew) {
+        await db.delete(lawChangelog).where(eq(lawChangelog.id, change.id));
+        deleted++;
+      } else if (
+        strippedOld !== (change.oldText ?? "") ||
+        strippedNew !== (change.newText ?? "")
+      ) {
+        await db
+          .update(lawChangelog)
+          .set({ oldText: strippedOld, newText: strippedNew })
+          .where(eq(lawChangelog.id, change.id));
+        updated++;
+      }
+    }
+
+    req.log.info({ deleted, updated }, "[Admin] Cleaned up false-positive law changes");
+    return res.json({ success: true, deleted, updated, scanned: allChanges.length });
+  } catch (error) {
+    req.log.error({ error }, "[Admin] Error cleaning up false positives");
     return res.status(500).json({ error: "Internal server error" });
   }
 });
