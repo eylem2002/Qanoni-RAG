@@ -98,7 +98,7 @@ All admin endpoints require `Authorization: Basic base64(admin:<ADMIN_PASSWORD>)
 - Article format on lob.gov.jo: `المادة N\n\nارتباطات المادة\n[text]` — NOT `المادة N:`.
 - Civil Law (43/1976) is 277KB — loads reliably with the homepage warmup strategy.
 - ID 3408 = قانون الملكية العقارية 13/2019 (NOT the old rental law 11/1994 which is no longer on lob.gov.jo).
-- UI chrome stripped by `stripUiElements()` before article comparison — prevents `تفسير N` counts from triggering false-positive change detections.
+- UI chrome stripped by `stripUiElements()` before article comparison — prevents `تفسير N` and `الاحكام القضائية N` counts from triggering false-positive change detections. Three known UI elements stripped: `تفسير N`, `التشريعات المرتبطة N`, `الاحكام القضائية N`.
 - OpenAPI schema names must NOT end in "Response" if they also appear as TypeScript types — Orval generates both a Zod schema and a TS interface with the same name, causing TS2308 conflicts on `export *`.
 
 ## Pointers

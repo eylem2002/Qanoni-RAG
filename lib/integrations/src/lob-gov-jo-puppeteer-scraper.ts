@@ -482,13 +482,15 @@ export class LobGovJoPuppeteerScraper {
    *   - "ارتباطات المادة" — article relationship UI label
    *
    * Without stripping these, UI updates (e.g. a new interpretation being added to
-   * an article) appear as law changes. The confirmed root cause of the 17 false
-   * positives in القانون المدني: "تفسير 2\n\n" was prepended to each affected article.
+   * an article) appear as law changes. Known false-positive sources:
+   *   - "تفسير N" (judicial interpretations count) — triggered 17 false positives in القانون المدني
+   *   - "الاحكام القضائية N" (judicial rulings count) — triggered 186 false positives in قانون التجارة
    */
   private stripUiElements(text: string): string {
     return text
       .replace(/^تفسير\s+\d+\s*/gm, "")
       .replace(/^التشريعات المرتبطة\s+\d+\s*/gm, "")
+      .replace(/^الاحكام القضائية\s+\d+\s*/gm, "")
       .replace(/ارتباطات المادة\s*/g, "")
       .replace(/\n{3,}/g, "\n\n")
       .trim();

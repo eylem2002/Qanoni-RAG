@@ -1,0 +1,1 @@
+- [Scraper UI strip patterns](scraper-ui-strip.md) — three lob.gov.jo UI elements cause false-positive change detections; all must stay in stripUiElements().
