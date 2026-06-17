@@ -1,0 +1,34 @@
+Audit this entire codebase and produce a complete, honest status report. Go through every directory, every route/page, every API endpoint, and every database table — don't summarize from memory, actually read the files. Output the report in this structure:
+
+1. TECH STACK & ARCHITECTURE
+- Frameworks, languages, key libraries actually used (check package.json/lockfiles, don't guess)
+- High-level architecture (frontend/backend split, database, hosting, any external APIs/LLM providers wired in)
+- Folder structure with a one-line purpose for each major directory
+
+2. FULL FEATURE INVENTORY
+For every feature that exists in the code (not the roadmap — only what's actually built), list:
+- Feature name
+- What it does
+- Status: fully working / partially working / UI exists but not wired to backend / stubbed with fake data / broken
+- Which files implement it
+
+3. USER WORKFLOWS, STEP BY STEP
+For every distinct user journey (e.g. "generate a contract", "review a contract", "sign up", "WhatsApp bot interaction"), trace it end to end:
+- Entry point → each step → what happens in backend/DB/AI call at each step → final output
+- Note any step that's currently broken, skipped, or faked
+
+4. DATA & INTEGRATIONS
+- Database schema (tables/models and what they store)
+- External services/APIs connected (auth provider, LLM provider, payment, WhatsApp, storage, etc.) and whether each is live or just configured/stubbed
+- Any hardcoded values, mock data, or placeholder API keys still in the code
+
+5. KNOWN GAPS
+- TODOs, FIXMEs, commented-out code, console.log debugging left in
+- Features referenced in the UI/code but not implemented
+- Error handling gaps (what happens on bad input, failed API calls, etc.)
+- Anything related to security: auth checks, data validation, exposed secrets
+
+6. WHAT'S MISSING FOR THE CORE PRODUCT
+Given this is meant to be an Arabic legal AI assistant (contract generation, contract review, WhatsApp bot, document vault) for the Jordanian market — explicitly call out which of these core pieces don't exist yet at all.
+
+Be blunt. Do not round up partial work to "done." If something is a UI shell with no real logic behind it, say so explicitly.
