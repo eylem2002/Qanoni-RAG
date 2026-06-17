@@ -1,0 +1,125 @@
+You are picking up after a read-only audit of two repos in this workspace: 
+"قانوني AI" (the contract generation + review app — Express/React/Claude) 
+and "Qanooni AI" (the law scraper + admin dashboard — Express/React/Postgres/Puppeteer). 
+The audit already confirmed exact file paths and behavior; trust it, but verify anything 
+you act on by reading the actual current file before changing it — code may have moved 
+since the audit ran.
+
+Do these three tasks in order. Do not skip ahead, do not combine them, and do not touch 
+any other part of the system. After each task, stop and report what you changed, what you 
+tested, and the exact commands/output that prove it works before moving to the next task.
+
+============================================================
+TASK 1 — Rotate and secure the committed admin password
+============================================================
+The audit found a plaintext password in Qanooni AI: ADMIN_PASSWORD = "qanooni-legal-2026" 
+in .replit, also repeated in replit.md.
+
+1. Generate a new strong random password (at least 24 chars, mixed case/numbers/symbols).
+2. Move it into Replit Secrets (or whatever this environment's actual secrets manager is) 
+   under the key ADMIN_PASSWORD. Do NOT put the new value in any committed file.
+3. Remove the literal password value from .replit and from replit.md — replace with a 
+   comment pointing to "see Secrets" or similar, never the value itself.
+4. Check git history for this repo: if the old password value appears in any prior commit, 
+   tell me explicitly that history-scrubbing is needed and what tool you'd use (e.g. 
+   git filter-repo) — do NOT run a history rewrite yourself without my confirmation, 
+   since it can break things if this repo is connected to anything else.
+5. Confirm the admin login flow still authenticates correctly against the NEW password 
+   read from the secret, not a hardcoded value, by actually logging in and showing me 
+   the result.
+6. Search the rest of BOTH repos for any other hardcoded credentials, API keys, or 
+   secrets sitting in plaintext in any committed file (not just this one password) — 
+   report anything you find, do not fix it yet, just list it.
+
+Report back: new password location, confirmation login works, git history finding, 
+and the list of any other hardcoded secrets found.
+
+============================================================
+TASK 2 — Connect قانوني AI's law lookup to Qanooni AI's real RAG endpoint
+============================================================
+قانوني AI's services/law/lawClient.ts calls ${LAW_SYSTEM_URL}/api/rag/retrieve. 
+LAW_SYSTEM_URL is currently unset, defaults to localhost:8080 (which is قانوني AI's 
+OWN api-server, with no /api/rag route), so this call always 404s and falls back to 
+either hardcoded employment law or "النصوص القانونية المرجعية غير متاحة حالياً" for 
+the other 4 contract types.
+
+Qanooni AI already exposes GET /api/rag/retrieve?contractType= with mappings for all 
+5 types (employment→8/1996, rental→43/1976+13/2019, service→43/1976, nda→43/1976, 
+supplier→43/1976+12/1966).
+
+1. Determine the actual reachable URL for Qanooni AI's api-server in this environment 
+   (internal Replit URL, deployed public URL, or whatever applies here). If both repos 
+   run as separate Replit apps, find the live URL of the Qanooni AI deployment. If you 
+   cannot determine this with certainty, STOP and ask me for it rather than guessing.
+2. Set LAW_SYSTEM_URL in قانوني AI's environment/secrets to that real address.
+3. Confirm Qanooni AI's /api/rag/retrieve endpoint is actually reachable from قانوني AI's 
+   environment — do a real test call for all 5 contractType values (employment, rental, 
+   service, nda, supplier) and show me the actual JSON returned for each, including 
+   whether law article text came back non-empty.
+4. Trace what lawClient.ts does with a successful response — confirm the returned 
+   article text actually reaches the Claude prompt for contract generation (not just 
+   that the HTTP call succeeds). Show me the relevant code path.
+5. Generate one test contract of EACH of the 5 types and show me, for each, whether the 
+   prompt sent to Claude now includes real statutory article text (and which law) instead 
+   of the fallback placeholder.
+6. If any contract type still falls back (e.g. a mapping is missing or a law's full_text 
+   is empty in Qanooni AI's database), tell me exactly which type and why — do not paper 
+   over it with another fallback.
+7. Check error handling: if Qanooni AI is ever down or slow, confirm قانوني AI still 
+   fails gracefully to its existing fallback rather than hanging or crashing the 
+   generation request.
+
+Report back: the URL you connected to, real JSON output per contract type, confirmation 
+the article text reaches the Claude prompt, and any contract type that's still ungrounded 
+and why.
+
+============================================================
+TASK 3 — Add user accounts and wire up real persistence in قانوني AI
+============================================================
+قانوني AI has Postgres + Drizzle ORM installed and configured but the schema is empty 
+(schema/index.ts exports nothing) and nothing the user does is ever saved — every 
+generated contract and review result lives only in browser memory for one session.
+
+1. Design and implement a minimal but real schema covering:
+   - users (id, email, hashed password OR auth provider id, firm name, created_at)
+   - contracts (id, user_id FK, contract_type, generated_text, input_data jsonb, 
+     law_articles_used jsonb, created_at)
+   - reviews (id, user_id FK, source_contract_id FK nullable, findings jsonb, 
+     created_at)
+   Use Drizzle migrations, not manual SQL — show me the migration files.
+2. Implement real authentication: sign up, log in, log out, session/JWT (your choice, 
+   tell me which and why). Passwords must be hashed (bcrypt or argon2), never stored 
+   or logged in plaintext. Protect the contract generation and review endpoints behind 
+   auth — an unauthenticated request should get a 401, not run an unlimited Claude call.
+3. Wire generation and review endpoints to ACTUALLY WRITE to these tables when a 
+   logged-in user completes a generation or review (not just return data to the 
+   frontend — persist it).
+4. Add minimal endpoints to list a user's past contracts and reviews (this is the 
+   foundation for the document vault later — don't build the full vault UI yet, just 
+   the data layer and basic list/retrieve API).
+5. Update the frontend minimally: a login/signup screen, and gate the existing 
+   generate/review screens behind being logged in. Do not redesign the UI beyond 
+   what's needed to support auth.
+6. Test end to end yourself: sign up a test user, generate a contract, confirm a row 
+   appears in the contracts table with the real data, log out, confirm an 
+   unauthenticated request to generate is rejected, log back in, confirm the contract 
+   appears in the list-past-contracts endpoint.
+7. Update the OpenAPI spec to include the new auth and listing endpoints — don't let 
+   spec drift get worse.
+
+Report back: schema/migration files, auth method chosen and why, proof (actual DB 
+query output or API responses) that a contract was created, saved, and retrieved for 
+a real test user, and confirmation that unauthenticated requests are rejected.
+
+============================================================
+GENERAL RULES FOR ALL THREE TASKS
+============================================================
+- Do not mark anything "done" without showing me the actual proof (command output, 
+  API response, DB row) — no rounding partial work up to complete.
+- Do not break any currently-working feature (contract generation, contract review, 
+  Word export, the Qanooni AI admin dashboard, the scraper). If something breaks, 
+  tell me immediately rather than working around it silently.
+- Do not add features beyond what's asked (no WhatsApp bot, no document vault UI, 
+  no payments — those come later).
+- If you hit a blocker or ambiguous decision (e.g. which auth method, where Qanooni AI 
+  is actually hosted), stop and ask me rather than guessing and proceeding.
