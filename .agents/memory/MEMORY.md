@@ -1,1 +1,1 @@
-- [Scraper UI strip patterns](scraper-ui-strip.md) — three lob.gov.jo UI elements cause false-positive change detections; all must stay in stripUiElements().
+- [RAG article extraction](rag-article-extraction.md) — RAG re-parses raw stored full_text; must strip `تعديلات المادة N` chrome before the boundary split or Labor Law bodies truncate to "تعديلات".

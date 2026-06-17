@@ -64,7 +64,7 @@ Scraper runs on startup + every Monday at 2AM. The legal team reviews any detect
 
 ## Admin Dashboard
 
-- **Login screen** — Arabic RTL password prompt. Password: stored in Replit Secrets under `ADMIN_PASSWORD` (never committed; see the Secrets tab). Password: set via the `ADMIN_PASSWORD` secret in Replit's Secrets tab.
+- **Login screen** — Arabic RTL password prompt. Password: stored in Replit Secrets under `ADMIN_PASSWORD` (never committed; see the Secrets tab).
 - **Dashboard** — stats (laws, pending reviews, system status), Sync Now button, Last Sync timestamp, priority action items, recent laws list. All panels show error states on API failure.
 - **Pending Reviews** — lists unacknowledged law changes grouped by law, with old/new text previews and per-change acknowledge buttons.
 - **Law Registry** — all 4 monitored laws with article count, last-updated date, active status, and lob.gov.jo link.
@@ -101,6 +101,7 @@ All admin endpoints require `Authorization: Basic base64(admin:<ADMIN_PASSWORD>)
 - ID 3408 = قانون الملكية العقارية 13/2019 (NOT the old rental law 11/1994 which is no longer on lob.gov.jo).
 - UI chrome stripped by `stripUiElements()` before article comparison — prevents `تفسير N` and `الاحكام القضائية N` counts from triggering false-positive change detections. Three known UI elements stripped: `تفسير N`, `التشريعات المرتبطة N`, `الاحكام القضائية N`.
 - OpenAPI schema names must NOT end in "Response" if they also appear as TypeScript types — Orval generates both a Zod schema and a TS interface with the same name, causing TS2308 conflicts on `export *`.
+- The RAG extractor (`artifacts/api-server/src/domains/rag/utils/extractArticles.ts`) re-parses the RAW stored `full_text`, so it must strip the `تعديلات المادة N` UI line *before* the article-boundary split. That line embeds `المادة N`, which the boundary lookahead would otherwise treat as the next article — truncating Labor Law (8/1996) bodies to the bare label "تعديلات". The scraper doesn't hit this because it never re-parses stored text.
 
 ## Pointers
 
