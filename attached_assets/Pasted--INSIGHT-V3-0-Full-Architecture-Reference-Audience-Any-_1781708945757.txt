@@ -1,0 +1,1070 @@
+# INSIGHT V3.0 — Full Architecture Reference
+
+> **Audience:** Any engineer (new or existing) who needs to understand how the codebase is structured, how files relate to each other, and what belongs where.
+
+---
+
+## Table of Contents
+
+1. [Project Overview](#1-project-overview)
+2. [Tech Stack](#2-tech-stack)
+3. [Repository Layout](#3-repository-layout)
+4. [Backend — Deep Dive](#4-backend--deep-dive)
+   - [Entry Points](#41-entry-points)
+   - [Bootstrap Layer](#42-bootstrap-layer)
+   - [API Layer (Middleware + Routes)](#43-api-layer-middleware--routes)
+   - [Domain Layer](#44-domain-layer)
+   - [Infrastructure Layer](#45-infrastructure-layer)
+   - [Core Utilities](#46-core-utilities)
+   - [Services](#47-services)
+   - [Jobs](#48-jobs)
+5. [Frontend — Deep Dive](#5-frontend--deep-dive)
+   - [Entry Points](#51-entry-points)
+   - [App Shell](#52-app-shell)
+   - [Router](#53-router)
+   - [Redux Store](#54-redux-store)
+   - [Portals](#55-portals)
+   - [Shared Components](#56-shared-components)
+   - [Hooks](#57-hooks)
+6. [Domain Pattern (The Golden Rule)](#6-domain-pattern-the-golden-rule)
+7. [Request Lifecycle](#7-request-lifecycle)
+8. [Database Strategy](#8-database-strategy)
+9. [IAM & Authorization](#9-iam--authorization)
+10. [Error Handling](#10-error-handling)
+11. [Environment Variables](#11-environment-variables)
+12. [File Responsibility Reference](#12-file-responsibility-reference)
+
+---
+
+## 1. Project Overview
+
+INSIGHT V3.0 is a full-stack internal ERP/management platform. It manages **leads, calls, performance, compensation, employees, inventory, quality control, and HR** for a high-traffic contact-center environment.
+
+The system is a **Node.js monolith backend** paired with a **React SPA frontend**, backed by MySQL, Redis, Snowflake, and GCP infrastructure.
+
+---
+
+## 2. Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Backend Runtime | Node.js (ES Modules) |
+| Backend Framework | Express.js |
+| Frontend Framework | React 18 |
+| Frontend Build | Vite |
+| UI Library | Material-UI (MUI) v7 |
+| State (Global) | Redux Toolkit |
+| State (Server) | TanStack React Query |
+| Primary Database | Cloud SQL MySQL 8 |
+| IAM Database | PostgreSQL |
+| Reporting Database | Snowflake |
+| Cache | Redis (via `ioredis`) |
+| Job Queue | BullMQ (backed by Redis) |
+| Pub/Sub | Google Cloud Pub/Sub |
+| File Storage | GCP Cloud Storage |
+| Hosting | GCP (GKE / Cloud Run) |
+| Reverse Proxy | Nginx |
+| CI/CD | GitHub Actions + GHCR |
+| Containers | Docker |
+
+---
+
+## 3. Repository Layout
+
+```
+INSIGHT-V3.0/
+├── backend/
+│   ├── server.js          ← Cluster manager (production entry)
+│   ├── app.js             ← Worker bootstrap
+│   ├── package.json
+│   └── src/
+│       ├── api/           ← Middleware + Route registry
+│       ├── bootstrap/     ← System initializers
+│       ├── core/          ← Errors, logger, utils, validation
+│       ├── domains/       ← 32 business domains (the main code)
+│       ├── infra/         ← DB, Redis, Sessions, Storage, Queues
+│       ├── jobs/          ← Async job definitions
+│       ├── services/      ← Cross-domain shared services
+│       └── routes/        ← Route aggregation helpers
+│
+└── frontend/
+    ├── vite.config.js
+    ├── package.json
+    └── src/
+        ├── main/          ← React DOM root
+        ├── app/           ← App shell, router, store, providers, APIs
+        ├── components/    ← Shared/global components
+        ├── portals/       ← Feature portals (one per page/section)
+        ├── domains/       ← Frontend domain logic (auth, spinWheel)
+        └── assets/        ← Icons and images
+```
+
+---
+
+## 4. Backend — Deep Dive
+
+### 4.1 Entry Points
+
+#### `backend/server.js` — Cluster Manager
+- Forks multiple worker processes using Node.js `cluster` module
+- Handles graceful shutdown and worker respawn
+- Runs only in production; dev runs a single process directly via `app.js`
+- **Does not contain any business logic** — only process management
+
+#### `backend/app.js` — Worker Entry Point
+- Called by each cluster worker (and directly in dev)
+- Runs the bootstrap sequence: env → logger → db → redis → sessions → queues → routes → API
+- Starts the Express HTTP server after all infra is confirmed healthy
+
+---
+
+### 4.2 Bootstrap Layer
+
+`backend/src/bootstrap/` — Each file is a single-responsibility initializer. They are called in order inside `app.js`. **Never put business logic here.**
+
+| File | Responsibility |
+|---|---|
+| `initEnv.js` | Load and validate all environment variables via `env.schema.js`. App crashes here if any required var is missing. |
+| `initLogger.js` | Set up the global logger (Winston or equivalent). Must run before anything else that logs. |
+| `initDb.js` | Open MySQL connection pools (write, read, reports) and verify health. Also initializes Snowflake if configured. |
+| `initRedis.js` | Connect to Redis, verify health. App can continue if Redis is down but with degraded caching. |
+| `initSessions.js` | Mount Express session middleware with Redis store. |
+| `initTokens.js` | Initialize session token management for cross-worker sync. |
+| `initQueues.js` | Set up BullMQ queues and Google Pub/Sub subscriptions. |
+| `initJobs.js` | Register recurring jobs (e.g., log flushing). Only runs on primary worker. |
+| `initEmail.js` | Configure nodemailer or equivalent email transport. |
+| `initProxy.js` | Mount Cloud Run proxy middleware if enabled. |
+| `initApi.js` | Create the Express app, apply CORS, body parsers, and return the `app` instance. |
+| `initRoutes.js` | Import all domain routes and register them on the Express app. |
+| `initLogsFlush.js` | Schedule periodic log flushing to persistent storage. |
+
+---
+
+### 4.3 API Layer (Middleware + Routes)
+
+#### `backend/src/api/middlewares/`
+
+Middleware runs on **every request** (global) or on **specific routes** (route-level). The pipeline order matters.
+
+| File | Type | Responsibility |
+|---|---|---|
+| `context.js` | Global | Attaches a per-request execution context object to `req`. Used downstream for tracing. |
+| `processRequest.js` | Global | Decodes session, attaches `req.user`, `req.permissions`. The main auth gate — all authenticated routes depend on this running first. |
+| `rateLimiter.js` | Global | Two limiters: `apiRateLimiter` (all routes) and `loginRateLimiter` (stricter, auth routes only). Backed by Redis. |
+| `requestLogger.js` | Global | Logs every incoming request with method, path, user, and response time. |
+| `errorHandler.js` | Global (last) | Catches all errors thrown downstream, maps them to proper HTTP status codes, and returns structured JSON error responses. Must be the last middleware registered. |
+| `notFoundHandler.js` | Global (last-1) | Catches any request that reached no route and returns `404`. Registered just before `errorHandler`. |
+| `checkAccess.js` | Route-level | Reads `req.user.permissions` and checks if the user *has* a given permission. Does not throw — returns a boolean. Used by UI-gating logic. |
+| `requireAccess.js` | Route-level | Same as `checkAccess` but **throws** `SecurityError` if the user lacks the permission. This is what protects every actual API endpoint. Usage: `requireAccess({ resource: 'inventory', action: 'view' })`. |
+| `validator.js` | Route-level | Wraps Joi schema validation. Call `validate(schema)` as middleware on a route to reject bad input before the controller runs. |
+| `uploadSafety.js` | Route-level | Validates file uploads: allowed MIME types, max size, malicious filename detection. |
+| `refreshPermissions.js` | Route-level | Triggers a permission cache refresh for the current user. Used after IAM changes. |
+| `syncSessionTokens.js` | Route-level | Syncs session tokens across cluster workers via Redis pub/sub. |
+| `index.js` | — | Barrel export for all middleware. |
+
+#### `backend/src/api/routes/`
+
+| File | Responsibility |
+|---|---|
+| `index.js` | **Main route registry.** Imports every domain's router and mounts it on the Express app with its base path (e.g., `/api/inventory`). This is the single source of truth for all API paths. |
+| `health.routes.js` | `/health` endpoint — returns system health (DB, Redis, process). Used by GCP load balancer. |
+| `internal.routes.js` | Internal/admin endpoints not exposed to the public. |
+
+---
+
+### 4.4 Domain Layer
+
+`backend/src/domains/` contains **32 business domains**. This is where 90% of the application code lives.
+
+#### Full Domain List
+
+| Domain Folder | What It Owns |
+|---|---|
+| `Auth/` | Login, logout, MFA, session refresh |
+| `agents/` | Agent profiles, assignments, status |
+| `dashboard/` | Dashboard data aggregation |
+| `qualityControl/` | QA scoring, QC reviews |
+| `leads/` | Lead acquisition, assignment, status, conversion |
+| `reports/` | Cross-domain reporting (hits reporting replica) |
+| `hr/` | HR sub-domains: employees, news, open roles, reports |
+| `iam/` | Identity & Access Management admin |
+| `violations/` | Violation tracking and workflows |
+| `codex/` | Document management |
+| `dictionary/` | Shared lookup data (news, quotes, terms) |
+| `developers/` | Developer tools and internal utilities |
+| `escalationProcess/` | Escalation workflows |
+| `companies/` | Company/client management |
+| `frd/` | FRD (Feature Requirements) documents |
+| `liaisons/` | Legal/compliance liaison management |
+| `market/` | Internal marketplace |
+| `ideaGenerator/` | Innovation submission tool |
+| `stickyNotes/` | Persistent note management |
+| `support/` | Support operations |
+| `yearbook/` | Employee recognition and yearbook |
+| `saturdaySheet/` | Weekly reporting sheet |
+| `priority/` | Priority queue management |
+| `dbExplorer/` | Live database introspection tool |
+| `MassOperations/` | Bulk data operations |
+| `incidentReports/` | Incident tracking and reporting |
+| `users/` | User settings and preferences |
+| `shared/` | Utilities shared across domains |
+| `spinWheel/` | Gamification spin-wheel feature |
+| `oneOnOne/` | 1-on-1 meeting management |
+| `inventory/` | Equipment inventory and floor mapping |
+| `db/` | Internal DB utility domain |
+
+#### Domain Internal Structure (see Section 6 for the full pattern)
+
+```
+domains/inventory/
+├── controller.js        ← HTTP handlers only
+├── routes.js            ← Route definitions + IAM guards
+├── logic/
+│   └── InventoryLogic.js   ← All business rules
+├── repos/
+│   └── InventoryRepo.js    ← All DB queries
+└── utils/               ← Domain-specific helpers (if needed)
+```
+
+Some large domains have **sub-domains** (e.g., `hr/employees/core/`, `hr/reports/`, `hr/news/`). Each sub-domain has its own `controller.js`, `routes.js`, `logic/`, and `repos/`.
+
+---
+
+### 4.5 Infrastructure Layer
+
+`backend/src/infra/` — Pure infrastructure. No business logic. All modules export functions/clients that the domain layer calls.
+
+#### `infra/db/`
+
+| File | Responsibility |
+|---|---|
+| `pools.js` | Creates and exports three MySQL connection pools: `writePool`, `readPool`, `reportsPool`. Pool sizes come from env vars. |
+| `query.js` | The single function all queries go through. Automatically routes to the correct pool based on query type (SELECT → read, writes → write, reports queries → reports). Handles parameterized query expansion for arrays. |
+| `transactions.js` | Wraps multiple queries in a MySQL transaction. Always uses the write pool. |
+| `health.js` | Ping function for the health check bootstrap. |
+| `postgres.js` | Separate PostgreSQL connection pool for the IAM system. |
+| `index.js` | Barrel export. |
+
+#### `infra/redis/`
+
+| File | Responsibility |
+|---|---|
+| `client.js` | Creates and exports the ioredis client. |
+| `cache.js` | `get(key)`, `set(key, value, ttl)`, `del(key)` — the standard cache interface. |
+| `json.js` | Store/retrieve JSON objects in Redis using JSON serialization. |
+| `lock.js` | Distributed locking — prevents race conditions in concurrent operations. |
+| `sets.js` | Redis set operations (add, remove, members). |
+| `scan.js` | Pattern-based key scanning — used for bulk cache invalidation. |
+| `queues.js` | BullMQ queue definitions backed by the Redis connection. |
+| `health.js` | Redis ping for the health check. |
+| `index.js` | Barrel export. |
+
+#### `infra/sessions/`
+
+| File | Responsibility |
+|---|---|
+| `mountSession.js` | Configures and mounts `express-session` with the Redis store. Sets cookie options, session name, and secret from env. |
+| `sessionHelpers.js` | Helper functions for reading/writing session data (e.g., `getSessionUser`, `destroySession`). |
+
+#### `infra/env/`
+
+| File | Responsibility |
+|---|---|
+| `env.schema.js` | Joi schema defining every environment variable — required vs optional, types, defaults. |
+| `env.guard.js` | Validates `process.env` against the schema on startup. Throws if required vars are missing. |
+| `env.profiles.js` | Named environment profiles (dev, staging, prod) with feature flag defaults. |
+| `index.js` | Exports the validated, typed env object used throughout the app. |
+
+#### `infra/storage/gcp/`
+- GCP Cloud Storage client
+- Upload, download, delete, and signed URL generation
+- Bucket names come from `GCP_BUCKET_INVENTORY` and `GCP_BUCKET_QC_RECORDINGS` env vars
+
+---
+
+### 4.5a DB Query Fundamentals (`infra/db/`)
+
+This is the lowest-level layer every domain repo touches. Understanding it is mandatory before writing any SQL.
+
+---
+
+#### `pools.js` — Connection Pool Initialization
+
+Called once during bootstrap (`initDb.js`). Creates and holds three MySQL pools as module-level singletons.
+
+```
+WritePool   → MySQL primary   (always created)
+ReadPool    → MySQL replica   (falls back to WritePool if not configured for this ENV profile)
+ReportsPool → MySQL replica   (falls back to WritePool if not configured for this ENV profile)
+```
+
+**How fallback works:** `ENV_PROFILES[NODE_ENV]` has boolean flags `readDb` and `reportsDb`. In `development`, both are usually `false`, so all three variables point to the same `WritePool`. In `production`, each points to its own dedicated host.
+
+```js
+// pools.js
+ReadPool = profile.readDb
+  ? mysql.createPool({ ...config.db.read, ... })
+  : WritePool;                                   // ← fallback
+```
+
+A separate **PostgreSQL** pool (`PostgresPool`) is also initialized here for the IAM system and exposed via `getPostgresPool()`.
+
+**Rules:**
+- `initPools()` must be called before any query runs — enforced by `getPools()` throwing if `WritePool` is null
+- Never import `WritePool` / `ReadPool` directly — always go through `getPools()`
+
+---
+
+#### `query.js` — The Single Query Gateway
+
+**Every DB call in the entire backend goes through this one function.** Repos never touch a pool directly.
+
+```js
+export async function query(sql, params = [], options = {})
+```
+
+**Signature:**
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `sql` | `string` | ✅ | SQL with `?` placeholders |
+| `params` | `Array` | ✅ (default `[]`) | Bound values — never string-interpolate |
+| `options.role` | `'write' \| 'read' \| 'reports'` | ✅ | Which pool to use |
+| `options.tag` | `string` | — | Label that appears in error logs |
+| `options.timeout` | `number` | — | Per-query timeout in ms |
+| `options.connection` | `PoolConnection` | — | Pass a transaction connection here |
+
+**What it does internally (in order):**
+
+1. **Guards** — throws `DBError` immediately if:
+   - `role` is missing
+   - `role` is not one of `write | read | reports`
+   - A write statement (`INSERT`, `UPDATE`, `DELETE`, `REPLACE`, `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `RENAME`, `GRANT`, `REVOKE`) is attempted with `role !== 'write'`
+
+2. **Pool resolution** — calls `resolvePool(role)` to get the correct `mysql2` pool
+
+3. **Executor selection** — uses `options.connection` if provided (for transactions), otherwise uses the pool directly
+
+4. **Protocol selection** — mysql2 has two execution modes:
+   - `execute()` → prepared statements (binary protocol, faster, safer for simple params)
+   - `query()` → text protocol (required when any param is itself an array, e.g. `IN (?)` with `[1,2,3]`)
+   - `shouldUseQueryForArrayExpansion(params)` checks for nested arrays and picks the right mode automatically
+
+5. **Error handling** — on failure: logs `role`, `tag`, `durationMs`, `err.message`, `mysqlCode`, `mysqlErrno`, then re-throws as `DBError`
+
+**Usage in a Repo:**
+
+```js
+// READ — operational query
+import { query } from '../../../infra/db/query.js';
+
+export function getAgentById(agentId) {
+  return query(
+    'SELECT id, name, status FROM agents WHERE id = ?',
+    [agentId],
+    { role: 'read', tag: 'agents.getById' }
+  );
+}
+
+// WRITE
+export function updateAgentStatus(agentId, status) {
+  return query(
+    'UPDATE agents SET status = ?, updated_at = NOW() WHERE id = ?',
+    [status, agentId],
+    { role: 'write', tag: 'agents.updateStatus' }
+  );
+}
+
+// READ with IN () — array param, uses text protocol automatically
+export function getAgentsByIds(ids) {
+  return query(
+    'SELECT id, name FROM agents WHERE id IN (?)',
+    [ids],                    // ← ids is an array → query() used instead of execute()
+    { role: 'read', tag: 'agents.getByIds' }
+  );
+}
+
+// REPORTS — heavy aggregation
+export function getMonthlyLeadStats(month) {
+  return query(
+    'SELECT department_id, COUNT(*) AS total FROM leads WHERE MONTH(created_at) = ? GROUP BY department_id',
+    [month],
+    { role: 'reports', tag: 'leads.monthlyStats' }
+  );
+}
+```
+
+**Critical rules for Repo authors:**
+- Always pass `role` — the query will throw without it
+- Never pass write SQL with `role: 'read'` or `role: 'reports'` — it will throw immediately
+- Always use `?` placeholders — never string-concatenate user input into SQL
+- Use `tag` on every query — it makes debugging log output usable
+- Pass `options.connection` when inside a `withTransaction()` callback
+
+---
+
+#### `transactions.js` — Atomic Multi-Query Operations
+
+Use `withTransaction` when two or more writes must succeed or fail together.
+
+```js
+export async function withTransaction(fn)
+```
+
+**What it does:**
+1. Gets a connection from `WritePool`
+2. Calls `BEGIN`
+3. Runs your callback `fn(connection)`
+4. On success → `COMMIT`, releases connection, returns `fn`'s return value
+5. On any error → `ROLLBACK` (failure to rollback is swallowed so the original error is not masked), releases connection, re-throws as `DBError`
+
+**Usage:**
+
+```js
+import { withTransaction } from '../../../infra/db/transactions.js';
+import { query } from '../../../infra/db/query.js';
+
+export async function transferItem(itemId, fromAgent, toAgent) {
+  return withTransaction(async (conn) => {
+    await query(
+      'UPDATE inventory SET assigned_to = ? WHERE id = ?',
+      [toAgent, itemId],
+      { role: 'write', connection: conn }   // ← pass the transaction connection
+    );
+    await query(
+      'INSERT INTO inventory_log (item_id, from_agent, to_agent, ts) VALUES (?, ?, ?, NOW())',
+      [itemId, fromAgent, toAgent],
+      { role: 'write', connection: conn }
+    );
+  });
+}
+```
+
+**Rules:**
+- `withTransaction` always uses `WritePool` — never use it for reads
+- Every `query()` call inside the callback **must** receive `connection: conn` — otherwise it opens a separate connection outside the transaction
+- Do not catch errors inside the callback — let them propagate so `withTransaction` handles the rollback
+
+---
+
+#### `postgres.js` — IAM Database
+
+The IAM system (`domains/iam/`) uses a separate PostgreSQL database. The `pg.Pool` is initialized via `initPostgresPool()` and retrieved via `getPostgresPool()`.
+
+```js
+import { getPostgresPool } from '../../../infra/db/postgres.js';
+
+const pg = getPostgresPool();
+const { rows } = await pg.query('SELECT * FROM policies WHERE entity_id = $1', [entityId]);
+```
+
+Note: Postgres uses `$1, $2, ...` placeholders, not `?`. The `query.js` gateway does **not** wrap Postgres — IAM repos call `pg.query()` directly.
+
+---
+
+#### `health.js`
+Pings each pool with `SELECT 1`. Called during `initDb.js` bootstrap to fail fast if any database is unreachable before the HTTP server starts.
+
+---
+
+#### `index.js` — Public API of `infra/db/`
+
+The barrel export. **This is the only file repos should import from.**
+
+```js
+import { query, withTransaction, getPostgresPool } from '../../../infra/db/index.js';
+```
+
+---
+
+#### `infra/queues/pubsub/`
+- Google Cloud Pub/Sub publisher and subscriber
+- Used for distributed async messaging between services
+- Topic and subscription names configured via env
+
+#### `infra/chats/`
+- `emails/` — Email sending via nodemailer (templates, transports)
+- `teams/` — Microsoft Teams webhook integration for alerts
+
+#### `infra/encryption/`
+- Document encryption/decryption using `DOCS_ENC_KEY`
+
+#### `infra/proxy/`
+- `cloudRunProxy.js` — Proxies requests to Cloud Run microservices
+
+#### `infra/monitoring/`
+- Metrics collection and health reporting
+
+#### `infra/realtime/`
+- WebSocket infrastructure (server-side)
+
+---
+
+### 4.6 Core Utilities
+
+`backend/src/core/` — Zero-dependency utility modules. No Express, no DB, no Redis imports allowed here.
+
+#### `core/errors/`
+
+The error hierarchy. Every thrown error in the app extends `AppError`.
+
+| Class | HTTP Status | When to Use |
+|---|---|---|
+| `AppError` | 500 | Base class — never throw directly |
+| `ValidationError` | 400 | Bad input from the client |
+| `SecurityError` | 401/403 | Auth failure or permission denied |
+| `NotFoundError` | 404 | Resource not found |
+| `RateLimitError` | 429 | Rate limit exceeded |
+| `DBError` | 500 | Database query failure |
+| `ServiceError` | 502 | External service failure |
+| `EmailError` | 500 | Email sending failure |
+| `JobError` | 500 | Background job failure |
+| `TeamsError` | 500 | Teams integration failure |
+
+Usage in domain code:
+```js
+import { ValidationError, NotFoundError } from '../../core/errors/index.js';
+throw new ValidationError('quantity must be a positive integer');
+throw new NotFoundError('inventory item not found');
+```
+
+#### `core/logger/`
+
+| File | Responsibility |
+|---|---|
+| `ApiLogger.js` | Structured request/response logging. Used by `requestLogger.js` middleware. |
+| `AuditLogger.js` | Compliance audit trail. Log every sensitive action (IAM changes, data exports, deletions). |
+| `index.js` | Exports the shared logger instance. |
+
+#### `core/utils/`
+
+| File | What It Contains |
+|---|---|
+| `buildFilterQuery.js` | Dynamically builds SQL WHERE clauses from filter objects. Used across report endpoints. |
+| `dateHelpers.js` | Date formatting, shifting, comparison helpers. |
+| `timeFrames.js` | Predefined time ranges (today, this week, this month, custom). |
+| `timezoneUtils.js` | Timezone conversion for multi-region data. |
+| `phoneUtils.js` | Phone number formatting and validation. |
+| `numberFormatters.js` | Currency, percentage, decimal formatting. |
+| `jsonParser.js` | Safe `JSON.parse` wrapper that never throws. |
+| `parseUtils.js` | Misc parsing helpers (query params, pagination). |
+| `audioHelpers.js` | Audio file duration extraction and metadata parsing. |
+| `HashUtil.js` | Hashing utilities (bcrypt wrappers for passwords). |
+| `PayloadSanitizer.js` | Strips dangerous keys from user-provided objects before DB writes. |
+
+#### `core/validation/`
+
+| File | Responsibility |
+|---|---|
+| `joiValidator.js` | Returns a middleware factory: `validate(schema)` → Express middleware that validates `req.body`. |
+| `fileUploads.js` | Joi extensions for validating file upload fields. |
+
+#### `core/context/`
+- `executionContext.js` — AsyncLocalStorage-based per-request context. Lets you read `req.user` from deep inside a service without passing it as a parameter.
+
+#### `core/constants/`
+- `index.js` — App-wide constants (status codes, enums, magic strings)
+- `qa-alerts.js` — QA alert type definitions
+- `qa-fields-template.js` — QA scoring field templates
+
+---
+
+### 4.7 Services
+
+`backend/src/services/` — Shared services used by **multiple domains**. If only one domain uses it, the logic stays inside that domain.
+
+| Service | Responsibility |
+|---|---|
+| `eligibility/` | Checks eligibility rules (bonuses, promotions, assignments) shared by leads, compensation, and HR |
+| `email/` | Higher-level email service (templates, recipients) built on top of `infra/chats/emails/` |
+| `forth/` | Forth API client with rate-limited queue integration |
+| `tokens/` | Session token generation, validation, and cross-worker sync |
+| `twilio/` | Twilio call integration (call initiation, recording, status webhooks) |
+
+---
+
+### 4.8 Jobs
+
+`backend/src/jobs/` — BullMQ job processor definitions. Each file exports a processor function that handles one job type.
+
+- Jobs are registered in `bootstrap/initJobs.js`
+- Only the **primary cluster worker** registers job processors in production
+- Jobs use `infra/redis/queues.js` for the queue connection
+
+---
+
+## 5. Frontend — Deep Dive
+
+### 5.1 Entry Points
+
+#### `frontend/src/main/main.jsx`
+- The single JS entry point Vite builds from
+- Renders `<App />` into `document.getElementById('root')`
+- Imports global CSS
+
+#### `frontend/vite.config.js`
+- Build configuration: entry, output, aliases (`@` → `src/`)
+- Dev server proxy rules (forwards `/api` to the backend)
+- Plugin list (React, etc.)
+
+---
+
+### 5.2 App Shell
+
+`frontend/src/app/` — Everything that wraps the whole application.
+
+#### `App.jsx`
+- Root React component
+- Wraps the tree with all providers in order:
+  ```
+  <ReduxProvider>
+    <ThemeProvider>        ← MUI theme
+      <QueryProvider>      ← TanStack React Query
+        <WebSocketProvider>
+          <UserProvider>
+            <BrowserRouter>
+              <AppRouter />
+            </BrowserRouter>
+          </UserProvider>
+        </WebSocketProvider>
+      </QueryProvider>
+    </ThemeProvider>
+  </ReduxProvider>
+  ```
+
+#### `app/apis/`
+
+| File | Responsibility |
+|---|---|
+| `apiClient.js` | Axios instance with base URL, credentials, and interceptors. **All API calls go through this.** Handles 401 → logout automatically. |
+| `apiHelpers.js` | Helper functions: `buildQueryString`, `handleApiError`, pagination helpers. |
+| `authApi.js` | Auth-specific API calls: login, logout, MFA verify, session refresh. |
+| `userSettingsApi.js` | User preference endpoints. |
+
+#### `app/providers/`
+
+| File | Responsibility |
+|---|---|
+| `ReduxProvider.jsx` | Wraps `<Provider store={store}>`. |
+| `QueryProvider.jsx` | Wraps `<QueryClientProvider>` with default stale/retry config. |
+| `UserProvider.jsx` | Context that holds the current user object and exposes `useUser()` hook. |
+
+#### `app/sidebarLayout/`
+- `sidebarLayout.js` — Defines the sidebar navigation structure (which portal links appear in the nav, icons, labels, order). Consumed by `Navbar.jsx`.
+
+---
+
+### 5.3 Router
+
+`frontend/src/app/router/`
+
+| File | Responsibility |
+|---|---|
+| `AppRouter.jsx` | Main router component. Defines the top-level route tree with layouts. Splits public routes (login) from authenticated routes. Uses `<Suspense>` for lazy-loaded portals. |
+| `routeRegistry.jsx` | Static route definitions — path → portal component mappings. This is where you add a new page. |
+| `iamRouteRegistry.js` | Dynamic routes generated from the user's IAM permissions. Some portals are only mounted if the user has access to them. |
+| `sessionRoutes.js` | Route guards — redirects unauthenticated users to login, redirects authenticated users away from login. |
+
+---
+
+### 5.4 Redux Store
+
+`frontend/src/app/store/`
+
+| File | Responsibility |
+|---|---|
+| `store.js` | Configures the Redux store with all slice reducers. |
+| `hooks.js` | Typed `useAppDispatch` and `useAppSelector` hooks. Use these instead of the raw Redux hooks. |
+| `slices/authSlice.js` | Auth state: `user`, `isAuthenticated`, `permissions`, `sessionStatus`. |
+| `slices/navigationSlice.js` | Navigation state: active portal, breadcrumbs. |
+| `slices/uiSlice.js` | Global UI state: loading flags, snackbar messages, modal open states. |
+| `selectors/authSelectors.js` | Memoized selectors for auth state. |
+| `selectors/iamSelectors.js` | Memoized selectors for permission lookups. |
+
+---
+
+### 5.5 Portals
+
+`frontend/src/portals/` — Each portal is a full feature section of the app. One portal = one top-level page/section.
+
+Every portal follows the same internal structure:
+
+```
+portals/[portal-name]/
+├── [portal-name].js         ← Route config export (path, lazy component, access key)
+├── portal/
+│   └── [Name]Portal.jsx     ← Root component for this portal (layout, tabs, context)
+├── apis/
+│   └── [name]Apis.js        ← All API calls for this portal
+├── components/              ← Portal-specific UI components
+│   ├── [Feature].jsx
+│   └── [SubFeature]/
+│       └── [SubFeature].jsx
+├── hooks/                   ← Portal-specific custom hooks
+│   └── use[Name].js
+├── helpers/                 ← Pure utility functions for this portal
+│   └── [name]Helpers.js
+├── styles/                  ← Portal-specific styles
+└── assets/                  ← Portal-specific images/icons
+```
+
+#### Portal Inventory
+
+| Portal Folder | Path | Description |
+|---|---|---|
+| `login/` | `/login` | Public login page with MFA support |
+| `home/` | `/home` | Landing page: top performers, news, confetti |
+| `dashboard/` | `/dashboard` | Agent & department dashboards with data grids |
+| `inventory/` | `/inventory` | Equipment tracking with interactive floor map |
+| `iam/` | `/iam` | IAM admin: resources, policies, permissions, audit |
+| `notFound/` | `*` | 404 page |
+
+---
+
+### 5.6 Shared Components
+
+`frontend/src/components/` — Components used by **more than one portal**. If a component is only used in one portal, it lives inside that portal's `components/` folder.
+
+#### `components/header/`
+- `AppHeader.jsx` — Top app bar with user info, notifications, sticky notes, idea generator
+- `agentInfo/` — Agent info card and guide popover
+- `notifications/` — Notification bell and drawer
+- `stickyNotes/` — Sticky note window and list
+- `ideaGenerator/` — Idea submission dialog
+
+#### `components/nav/`
+- `Navbar.jsx` — Collapsible sidebar navigation. Reads route list from `sidebarLayout.js`. Shows only permitted portals based on IAM.
+- `hooks/useNavbarLogout.js` — Handles logout sequence (clear session, clear Redux, redirect)
+
+#### `components/ui/`
+Reusable primitive components. **These have no business logic.**
+
+| Component | Responsibility |
+|---|---|
+| `tables/DataGrid.jsx` | Wrapper around MUI X DataGrid Premium with default config (pagination, density, toolbar) |
+| `addButton/` | Standard "Add" action button with loading state |
+| `deleteButton/` | Standard "Delete" action button with confirmation |
+| `dialogAlert/` | Reusable confirmation dialog (title, message, confirm/cancel) |
+| `printButton/` | Print action that triggers `window.print()` with correct styles |
+| `logoutbutton/` | Standalone logout button component |
+| `InfinityLoader/` | Full-page loading spinner |
+| `infinityLoaderStatCharts/` | Loading placeholder for stat chart areas |
+| `FlipAnimation/` | CSS flip card animation wrapper |
+| `notesStorage/` | Notes persistence UI with its own API layer |
+| `userProvider/` | Legacy user context wrapper (prefer `app/providers/UserProvider`) |
+
+#### `components/iam/`
+- `SessionActionDialog.jsx` — Dialog shown when a session action is needed (e.g., permission changed while logged in)
+
+#### `components/saveManagement/`
+- `BulletproofSaveManager.jsx` — Wraps forms with auto-save, draft persistence, and conflict detection
+- `SaveStatusIndicator.jsx` — Shows save status (saving / saved / error) in the UI
+
+#### `components/websocket/`
+- `WebSocketContext.jsx` — React context that holds the WebSocket connection
+- `useWebSocketMessages.js` — Hook to subscribe to real-time messages by topic
+
+#### `components/hooks/`
+- `useBulletproofSave.js` — Form save logic with optimistic updates and rollback
+- `useDocumentTitle.js` — Sets `document.title` based on current portal
+- `usePermission.js` — `usePermission(resource, action)` → `boolean`. The frontend equivalent of `requireAccess`.
+- `apis/draftApi.js` — API calls for draft/auto-save persistence
+
+#### `components/utils/`
+- `styles.js` — Shared MUI `sx` prop style objects
+- `text.js` — Text truncation, capitalization helpers
+- `useNews.js` — Hook that fetches and caches news items
+- `useQuotes.js` — Hook that fetches motivational quotes
+
+---
+
+### 5.7 Hooks
+
+The project uses hooks in three scopes:
+
+| Scope | Location | Rule |
+|---|---|---|
+| App-wide | `components/hooks/` | Used by 2+ portals |
+| Portal-specific | `portals/[name]/hooks/` | Only used inside that portal |
+| Component-specific | Defined inline in the component file | Only used in that one component |
+
+---
+
+## 6. Domain Pattern (The Golden Rule)
+
+Every backend domain — without exception — must follow this 4-layer pattern:
+
+```
+controller.js  →  logic/[Name]Logic.js  →  repos/[Name]Repo.js  →  DB
+```
+
+### What Goes Where
+
+#### `routes.js`
+- Import `express.Router()`
+- Define HTTP method + path
+- Apply middleware (`requireAccess`, `validate`)
+- Call the controller method
+- **No logic, no DB calls, no business decisions**
+
+```js
+import { requireAccess } from '../../../api/middlewares/index.js';
+import { validate } from '../../../core/validation/joiValidator.js';
+import * as controller from './controller.js';
+import { addItemSchema } from './validation.js';
+
+router.get('/get-inventory',
+  requireAccess({ resource: 'inventory', action: 'view' }),
+  controller.getInventory
+);
+
+router.post('/add-item',
+  requireAccess({ resource: 'inventory', action: 'create' }),
+  validate(addItemSchema),
+  controller.addItem
+);
+```
+
+#### `controller.js`
+- Extract data from `req` (params, body, user, query)
+- Call one `Logic` method
+- Send the response
+- **No SQL, no Redis, no business rules — just wire `req` → logic → `res`**
+
+```js
+import * as InventoryLogic from './logic/InventoryLogic.js';
+
+export async function getInventory(req, res, next) {
+  try {
+    const { departmentId } = req.query;
+    const data = await InventoryLogic.getInventory(departmentId, req.user);
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+}
+```
+
+#### `logic/[Name]Logic.js`
+- All business rules live here
+- Can call Repo methods, Redis, other services
+- Throws typed errors (`ValidationError`, `NotFoundError`) when rules are violated
+- **No `req`/`res` objects — pure functions that take plain args and return plain data**
+
+```js
+import * as InventoryRepo from '../repos/InventoryRepo.js';
+import { cache } from '../../../infra/redis/cache.js';
+import { NotFoundError } from '../../../core/errors/index.js';
+
+export async function getInventory(departmentId, user) {
+  const cacheKey = `inventory:dept:${departmentId}`;
+  const cached = await cache.get(cacheKey);
+  if (cached) return cached;
+
+  const items = await InventoryRepo.findByDepartment(departmentId);
+  if (!items.length) throw new NotFoundError('no inventory for this department');
+
+  await cache.set(cacheKey, items, 300);
+  return items;
+}
+```
+
+#### `repos/[Name]Repo.js`
+- All SQL lives here
+- Uses `infra/db/query.js` — never raw pool directly
+- Returns plain objects/arrays
+- **No business logic, no cache, no errors other than re-throwing DBErrors**
+
+```js
+import { query } from '../../../infra/db/query.js';
+
+export async function findByDepartment(departmentId) {
+  return query(
+    'SELECT * FROM inventory_items WHERE department_id = ? AND is_active = 1',
+    [departmentId]
+  );
+}
+
+export async function insertItem(data) {
+  return query(
+    'INSERT INTO inventory_items (name, department_id, assigned_to) VALUES (?, ?, ?)',
+    [data.name, data.departmentId, data.assignedTo]
+  );
+}
+```
+
+---
+
+## 7. Request Lifecycle
+
+A full round-trip from browser to database and back:
+
+```
+Browser
+  │
+  ▼
+Nginx (SSL termination, reverse proxy)
+  │
+  ▼
+Express App
+  │
+  ├─ rateLimiter          ← Check Redis for rate limit
+  ├─ context              ← Attach trace context to req
+  ├─ processRequest       ← Decode session, attach req.user
+  ├─ requestLogger        ← Log the incoming request
+  │
+  ├─ [route matched]
+  │   ├─ requireAccess    ← Check IAM permissions (throws 403 if denied)
+  │   ├─ validate         ← Joi schema validation (throws 400 if invalid)
+  │   └─ controller       ← Extract args, call Logic
+  │       └─ Logic        ← Business rules, cache check
+  │           └─ Repo     ← SQL query via infra/db/query.js
+  │               └─ MySQL (write / read / reports pool)
+  │
+  ├─ notFoundHandler      ← If no route matched
+  └─ errorHandler         ← Maps errors to HTTP responses
+
+Browser ← JSON response
+```
+
+---
+
+## 8. Database Strategy
+
+### Pool Routing
+
+| Query Type | Pool Used | When |
+|---|---|---|
+| `INSERT`, `UPDATE`, `DELETE` | Write Pool | Always for mutations |
+| `SELECT` (operational) | Read Pool | Regular reads (replicated from write) |
+| `SELECT` (reports/analytics) | Reports Pool | Heavy aggregations, cross-domain reports |
+
+The `infra/db/query.js` function detects the query type and routes automatically. You can also explicitly specify the pool.
+
+### IAM (PostgreSQL)
+
+The IAM system uses a **separate PostgreSQL database** (`infra/db/postgres.js`). This isolates permission data from the operational MySQL database.
+
+### Snowflake (Reporting)
+
+Heavy analytical queries that would strain MySQL go to Snowflake. The `reports/` domain uses this pool. Historical data, cross-period aggregations, and BI-style queries live here.
+
+### Transaction Pattern
+
+```js
+import { transaction } from '../../../infra/db/transactions.js';
+
+await transaction(async (conn) => {
+  await conn.query('UPDATE leads SET status = ? WHERE id = ?', ['closed', leadId]);
+  await conn.query('INSERT INTO lead_events (lead_id, event) VALUES (?, ?)', [leadId, 'closed']);
+});
+```
+
+---
+
+## 9. IAM & Authorization
+
+### How It Works
+
+1. On login, the user's permissions are fetched from PostgreSQL and stored in their Redis session
+2. `processRequest.js` middleware attaches permissions to `req.user.permissions` on every request
+3. `requireAccess({ resource, action })` checks `req.user.permissions` and throws `SecurityError` if the user lacks the grant
+4. The frontend `usePermission(resource, action)` hook reads the same permission set (synced from the session) to show/hide UI elements
+
+### Permission Model
+
+```
+resource: 'inventory'
+action:   'view' | 'create' | 'edit' | 'delete' | 'export'
+```
+
+### IAM Admin Portal
+
+The `portals/iam/` frontend and `domains/iam/` backend together form the IAM management UI, where admins manage resources, actions, policies, templates, and grants.
+
+---
+
+## 10. Error Handling
+
+### Backend
+
+Throw typed errors from Logic. They bubble up through the Controller to `errorHandler.js`, which maps them to HTTP responses:
+
+```js
+// In Logic:
+throw new ValidationError('start date must be before end date');
+
+// errorHandler.js automatically sends:
+// HTTP 400: { success: false, error: 'start date must be before end date' }
+```
+
+### Frontend
+
+The Axios interceptor in `apiClient.js` catches HTTP errors. Components use React Query's `onError` callback or try/catch in mutations. The `uiSlice.js` holds global snackbar state for showing error toasts.
+
+---
+
+## 11. Environment Variables
+
+### Required (app crashes without these)
+
+```
+PORT                   Express server port
+NODE_ENV               development | production
+SYSTEM_USER_ID         ID of the internal system user for automated actions
+SESS_NAME              Express session cookie name
+SESS_SECRET            Express session signing secret
+DB_WRITE_HOST          MySQL primary host
+DB_WRITE_USER          MySQL write username
+DB_WRITE_PASSWORD      MySQL write password
+DB_WRITE_DATABASE      MySQL database name
+REDIS_HOST             Redis host
+REDIS_PORT             Redis port
+REDIS_PASSWORD         Redis password
+GCP_BUCKET_INVENTORY   GCP bucket name for inventory files
+GCP_BUCKET_QC_RECORDINGS  GCP bucket name for QC recordings
+DOCS_ENC_KEY           Encryption key for document storage
+```
+
+### Optional (features degrade gracefully if missing)
+
+```
+DB_READ_HOST / DB_READ_USER / DB_READ_PASSWORD     ← Read replica
+DB_REPORTS_HOST / DB_REPORTS_USER / DB_REPORTS_PASSWORD ← Reports replica
+SF_ACCOUNT / SF_USERNAME / SF_PASSWORD / SF_ROLE   ← Snowflake
+MFA_ENABLED            true | false
+JOBS_ENABLED           true | false
+EMAILS_ENABLED         true | false
+```
+
+---
+
+## 12. File Responsibility Reference
+
+Quick reference: what each type of file should and should NOT contain.
+
+| File Type | Must Contain | Must NOT Contain |
+|---|---|---|
+| `server.js` | Cluster fork logic, process lifecycle | Business logic, Express setup |
+| `app.js` | Bootstrap sequence, server listen | Business logic, route definitions |
+| `bootstrap/init*.js` | Single infra initialization concern | Business logic, domain code |
+| `api/routes/index.js` | Domain router imports and `app.use()` mounts | Business logic, middleware definitions |
+| `domain/routes.js` | Router definition, middleware chain, controller calls | SQL, business rules, direct DB calls |
+| `domain/controller.js` | `req` extraction, call Logic, send `res` | SQL queries, business rules, Redis calls |
+| `domain/logic/*.js` | Business rules, validation logic, cache interaction | Raw SQL, `req`/`res` objects, HTTP concerns |
+| `domain/repos/*.js` | SQL queries, DB calls via `query.js` | Business rules, caching, HTTP concerns |
+| `infra/**/*.js` | Infrastructure clients and abstractions | Business logic, domain knowledge |
+| `core/errors/*.js` | Error class definition | Logic, DB calls |
+| `core/utils/*.js` | Pure utility functions | Side effects, DB/Redis calls |
+| `services/**/*.js` | Cross-domain shared service logic | Domain-specific rules |
+| Portal `*.js` (route config) | Path, lazy component, access resource key | Component code |
+| Portal `portal/[Name]Portal.jsx` | Layout, tab structure, top-level context | Direct API calls (use hooks), styling details |
+| Portal `apis/[name]Apis.js` | All `apiClient` calls for this portal | Component code, business logic |
+| Portal `hooks/use*.js` | React Query queries/mutations, local state | API call implementations |
+| Portal `helpers/[name]Helpers.js` | Pure JS utility functions for this portal | React hooks, API calls |
+| `components/ui/` | Generic presentational components | Business logic, API calls |
+| `app/store/slices/` | Redux slice (state shape, reducers, actions) | API calls, side effects (use RTK Query or React Query instead) |
+
+---
+
+*Last updated: June 2026*
