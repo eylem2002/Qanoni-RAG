@@ -64,7 +64,7 @@ Scraper runs on startup + every Monday at 2AM. The legal team reviews any detect
 
 ## Admin Dashboard
 
-- **Login screen** — Arabic RTL password prompt. Password: see `ADMIN_PASSWORD` env var (currently `qanooni-legal-2026`).
+- **Login screen** — Arabic RTL password prompt. Password: stored in Replit Secrets under `ADMIN_PASSWORD` (never committed; see the Secrets tab).
 - **Dashboard** — stats (laws, pending reviews, system status), Sync Now button, Last Sync timestamp, priority action items, recent laws list. All panels show error states on API failure.
 - **Pending Reviews** — lists unacknowledged law changes grouped by law, with old/new text previews and per-change acknowledge buttons.
 - **Law Registry** — all 4 monitored laws with article count, last-updated date, active status, and lob.gov.jo link.
