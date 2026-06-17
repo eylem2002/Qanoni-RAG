@@ -1,21 +1,16 @@
-import app from "./app";
-import { logger } from "./lib/logger";
+import { initApi } from "./bootstrap/initApi";
+import { initRoutes } from "./bootstrap/initRoutes";
+import { initJobs } from "./bootstrap/initJobs";
+import { getPort } from "./bootstrap/initEnv";
+import { logger } from "./core/logger";
 
-const rawPort = process.env["PORT"];
+const app = initApi();
+initRoutes(app);
+initJobs();
 
-if (!rawPort) {
-  throw new Error(
-    "PORT environment variable is required but was not provided.",
-  );
-}
+const port = getPort();
 
-const port = Number(rawPort);
-
-if (Number.isNaN(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: "${rawPort}"`);
-}
-
-app.listen(port, (err) => {
+app.listen(port, (err?: Error) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
     process.exit(1);

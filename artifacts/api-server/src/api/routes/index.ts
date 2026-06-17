@@ -1,8 +1,8 @@
 import { Router, type IRouter } from "express";
-import healthRouter from "./health";
-import lawChangesRouter from "./admin/law-changes";
-import ragRouter from "./rag";
-import { adminAuth } from "../lib/admin-auth";
+import healthRouter from "./health.routes";
+import ragRouter from "../../domains/rag/routes";
+import lawChangesRouter from "../../domains/lawChanges/routes";
+import { adminAuth } from "../middlewares";
 
 const router: IRouter = Router();
 

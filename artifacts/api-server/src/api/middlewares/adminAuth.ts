@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
+import { getAdminPassword } from "../../bootstrap/initEnv";
 
 /**
  * HTTP Basic Auth middleware protecting all /api/admin/* routes.
@@ -8,11 +9,11 @@ import type { Request, Response, NextFunction } from "express";
  * If ADMIN_PASSWORD is not set the middleware blocks all requests with 503
  * rather than silently allowing unauthenticated access — fail closed.
  *
- * Usage in routes/index.ts:
+ * Usage in api/routes/index.ts:
  *   router.use("/admin", adminAuth, adminRouter);
  */
 export function adminAuth(req: Request, res: Response, next: NextFunction): void {
-  const password = process.env["ADMIN_PASSWORD"];
+  const password = getAdminPassword();
 
   if (!password) {
     req.log.error(

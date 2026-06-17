@@ -1,5 +1,5 @@
 import { lobGovScraper } from "@workspace/integrations";
-import { logger } from "./logger";
+import { logger } from "../core/logger";
 
 // ---------------------------------------------------------------------------
 // Sync state (in-memory — single-process server)
