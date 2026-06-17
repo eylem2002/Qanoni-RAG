@@ -1,0 +1,82 @@
+You are running a verification audit, not new work. I need you to confirm — by actually 
+testing live, not by reading your own previous summaries — whether the three tasks from 
+earlier (password rotation, RAG connection, accounts+persistence) are genuinely in place 
+right now, today, in the running system. Assume nothing carries over from before; re-verify 
+every claim from scratch. Where something is NOT actually working, say so plainly — do not 
+soften it or imply partial credit.
+
+Report using this exact structure, one section per task, each item marked ✅ CONFIRMED, 
+❌ NOT WORKING, or ⚠️ PARTIALLY WORKING with an explanation.
+
+============================================================
+VERIFY TASK 1 — Admin password rotation (Qanooni AI)
+============================================================
+1. Open .replit and replit.md right now and paste the relevant lines — confirm no 
+   plaintext password value appears in either file currently.
+2. Read the actual current value being used for ADMIN_PASSWORD at runtime (from Secrets, 
+   not from memory of what was set) — confirm it is NOT "qanooni-legal-2026".
+3. Actually attempt to log in to the admin dashboard with the OLD password 
+   ("qanooni-legal-2026") — paste the real response/status code. Expected: rejected (401 
+   or equivalent).
+4. Actually attempt to log in with the NEW password from Secrets — paste the real 
+   response/status code. Expected: success (200 or equivalent).
+5. Confirm whether the container needed a full Stop→Run to pick this up, and confirm 
+   that has actually been done (not just a workflow restart) — state explicitly which 
+   kind of restart occurred most recently.
+6. Re-check: is the old password still present anywhere in git history? Has any 
+   scrubbing happened, or is this still outstanding? State current status plainly.
+7. Re-list any other hardcoded secrets found earlier — confirm whether they've been 
+   addressed or are still sitting in plaintext.
+
+============================================================
+VERIFY TASK 2 — RAG connection (قانوني AI ↔ Qanooni AI)
+============================================================
+1. Print the actual current value of LAW_SYSTEM_URL in قانوني AI's environment right now.
+2. Make a live test call from قانوني AI's environment to 
+   {LAW_SYSTEM_URL}/api/rag/retrieve?contractType=X for ALL FIVE types: employment, 
+   rental, service, nda, supplier. Paste the actual raw JSON response for each — not a 
+   summary, the real output.
+3. For each of the 5 responses, confirm explicitly whether real law article text came 
+   back (non-empty, not the fallback placeholder string).
+4. Generate one real test contract of EACH of the 5 types right now (not from earlier) 
+   and show me, for each, whether the system prompt sent to Claude contains real 
+   statutory text and which law it cites. If you can't show the literal prompt for 
+   security/length reasons, show at minimum the law_id and a snippet of the article 
+   text that made it into context.
+5. Explicitly state: how many of the 5 contract types are now actually law-grounded? 
+   If fewer than 5, name which ones aren't and why.
+6. Kill or simulate Qanooni AI being unreachable (or check the timeout/fallback logic 
+   directly in code) and confirm قانوني AI still degrades gracefully instead of hanging 
+   or crashing.
+
+============================================================
+VERIFY TASK 3 — Accounts + persistence (قانوني AI)
+============================================================
+1. Show me the current schema/index.ts contents — confirm users, contracts, and reviews 
+   tables are actually defined and exported (not still empty).
+2. Run an actual signup for a brand-new test user right now — paste the real API 
+   response.
+3. Query the users table directly and paste the real row that was created — confirm 
+   the password is hashed, not plaintext.
+4. Log in as that test user — paste the real response (token/session, whatever the 
+   mechanism is).
+5. Generate one contract while authenticated as that user — paste the API response, 
+   then query the contracts table directly and paste the real row showing it was 
+   persisted with that user_id.
+6. Log out / drop the session, then attempt to call the generate-contract endpoint 
+   with NO auth — paste the real response. Expected: 401, not a successful generation.
+7. Call the list-past-contracts endpoint as the logged-in test user — paste the real 
+   response and confirm the contract from step 5 appears in it.
+8. Open the OpenAPI spec file right now and confirm whether the new auth and 
+   listing endpoints are actually documented in it, or still missing.
+9. Confirm no existing feature broke: generate one contract of a type NOT tied to 
+   your test user flow, confirm contract generation streaming still works, confirm 
+   contract review (upload a file) still works, confirm Word export still works.
+
+============================================================
+FINAL SUMMARY
+============================================================
+Give me a single table: Task | Sub-item | Status (✅/❌/⚠️) | One-line evidence.
+Then one sentence: "X of Y total checks passed." Be exact, don't round up.
+If anything is ❌ or ⚠️, tell me specifically what's blocking it and what you'd need 
+to do to close it — but do not start fixing it yet. Wait for my go-ahead.
