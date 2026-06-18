@@ -47,3 +47,11 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Local tooling config/cache
+.config/
+
+# Environment files
+.env
+.env.*
+!.env.example
