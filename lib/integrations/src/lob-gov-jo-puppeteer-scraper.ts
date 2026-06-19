@@ -253,7 +253,9 @@ export class LobGovJoPuppeteerScraper {
         }
 
         console.log(`[LobGovScraper]   Extracted ${charCount} characters`);
-        await this.processExtractedLaw(lawMeta, lawText);
+        const isActive = this.parseIsActiveFromText(lawText);
+        console.log(`[LobGovScraper]   Status: ${isActive ? "ساري (active)" : "غير ساري (inactive)"}`);
+        await this.processExtractedLaw(lawMeta, lawText, isActive);
         return;
       } catch (error) {
         lastError = error as Error;
@@ -288,9 +290,18 @@ export class LobGovJoPuppeteerScraper {
       .trim();
   }
 
+  private parseIsActiveFromText(text: string): boolean {
+    // lob.gov.jo renders "حالة التشريع" followed by "ساري" or "غير ساري"
+    const match = text.match(/حالة التشريع\s*(غير ساري|ساري)/);
+    if (match) return match[1] === "ساري";
+    // Default to active if the status label isn't found — don't wrongly deactivate
+    return true;
+  }
+
   private async processExtractedLaw(
     lawMeta: LobLawMetadata,
-    newText: string
+    newText: string,
+    isActive: boolean
   ): Promise<void> {
     const lawId = `${lawMeta.legislationNumber}/${lawMeta.legislationYear}`;
 
@@ -332,7 +343,7 @@ export class LobGovJoPuppeteerScraper {
         articleCount,
         lastUpdated: new Date(),
         lobGovUrl: lawMeta.lobGovUrl,
-        isActive: lawMeta.status === "active",
+        isActive,
       });
 
       // Record initial version
@@ -358,13 +369,17 @@ export class LobGovJoPuppeteerScraper {
 
       if (!hasChanges) {
         console.log("[LobGovScraper]   No changes detected");
-        // Keep full_text current even if article content is unchanged,
-        // so the next scrape has the freshest raw text to compare against.
-        if (newText !== oldText) {
+        // Always sync isActive and keep full_text current so the next scrape
+        // has the freshest raw text and an accurate active status.
+        const oldIsActive = existing[0]!.isActive;
+        if (newText !== oldText || isActive !== oldIsActive) {
           await db
             .update(laws)
-            .set({ fullText: newText, lastUpdated: new Date() })
+            .set({ fullText: newText, lastUpdated: new Date(), isActive })
             .where(eq(laws.lawId, lawId));
+          if (isActive !== oldIsActive) {
+            console.log(`[LobGovScraper]   Status changed: ${oldIsActive ? "active→inactive" : "inactive→active"}`);
+          }
         }
         return;
       }
@@ -374,7 +389,7 @@ export class LobGovJoPuppeteerScraper {
 
       await db
         .update(laws)
-        .set({ fullText: newText, lastUpdated: new Date(), articleCount })
+        .set({ fullText: newText, lastUpdated: new Date(), articleCount, isActive })
         .where(eq(laws.lawId, lawId));
 
       // Record new version snapshot

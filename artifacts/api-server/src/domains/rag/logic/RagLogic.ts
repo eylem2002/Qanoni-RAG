@@ -57,6 +57,10 @@ export async function retrieveArticles(
       log.warn({ lawId: mapping.lawId }, "[RAG] Law not found in DB — skipping");
       continue;
     }
+    if (!law.isActive) {
+      log.warn({ lawId: mapping.lawId, arabicName: law.arabicName }, "[RAG] Law is inactive (غير ساري) — skipping");
+      continue;
+    }
 
     const relevantArticleNums = (mapping.relevantArticles as number[]) ?? [];
     const extracted = extractArticleTexts(law.fullText, relevantArticleNums);
