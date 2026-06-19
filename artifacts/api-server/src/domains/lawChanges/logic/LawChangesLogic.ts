@@ -84,8 +84,38 @@ export async function getPendingChanges(): Promise<{
 
 // ── Acknowledge ───────────────────────────────────────────────────────────
 
+/**
+ * Notifies Qanooni to invalidate its RAG cache for the given contract types.
+ * Fire-and-forget — a failure here must never break the acknowledge flow.
+ */
+async function notifyQanooni(contractTypes: string[]): Promise<void> {
+  const qanooniUrl = process.env.QANOONI_BASE_URL;
+  if (!qanooniUrl) return;
+
+  const url = `${qanooniUrl.replace(/\/$/, "")}/api/admin/law-changes/acknowledged`;
+
+  for (const contractType of contractTypes) {
+    try {
+      await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contractType }),
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch {
+      // intentionally swallowed — Qanooni notification is best-effort
+    }
+  }
+}
+
 export async function acknowledgeChange(changeId: number): Promise<void> {
+  const [row] = await LawChangesRepo.findChangeById(changeId);
   await LawChangesRepo.acknowledgeChange(changeId);
+
+  const contractTypes = (row?.affectedContractTypes as string[] | null) ?? [];
+  if (contractTypes.length > 0) {
+    void notifyQanooni(contractTypes);
+  }
 }
 
 // ── History ───────────────────────────────────────────────────────────────

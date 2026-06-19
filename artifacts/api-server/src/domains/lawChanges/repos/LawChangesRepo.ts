@@ -17,6 +17,10 @@ export function findLawById(lawId: string) {
   return db.select().from(laws).where(eq(laws.lawId, lawId)).limit(1);
 }
 
+export function findChangeById(changeId: number) {
+  return db.select().from(lawChangelog).where(eq(lawChangelog.id, changeId)).limit(1);
+}
+
 export function acknowledgeChange(changeId: number) {
   return db
     .update(lawChangelog)
